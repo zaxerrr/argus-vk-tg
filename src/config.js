@@ -35,6 +35,7 @@ const SUPABASE_SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
 const LEAD_CHAT_ID   = process.env.LEAD_CHAT_ID || null;
 const DEBUG_CHAT_ID  = process.env.DEBUG_CHAT_ID || null;
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const VK_CONFIRMATION_CODE = process.env.VK_CONFIRMATION_CODE || null;
 
 const BOT_VERSION    = process.env.BOT_VERSION || readPackageVersion() || '0.0.0';
 
@@ -49,5 +50,6 @@ module.exports = {
   ADMIN_USER_IDS,
   BOT_VERSION,
   SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY
+  SUPABASE_SERVICE_ROLE_KEY,
+  VK_CONFIRMATION_CODE
 };

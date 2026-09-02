@@ -7,6 +7,7 @@ const bodyParser = require('body-parser');
 const {
   VK_GROUP_ID,
   VK_SECRET_KEY,
+  VK_CONFIRMATION_CODE,
   TELEGRAM_CHAT_ID,
   DEBUG_CHAT_ID,
   BOT_VERSION
@@ -64,8 +65,17 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   const secretOk = provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
   if (!secretOk) return res.status(403).send('Forbidden');
 
-  // confirmation/шум — быстрое подтверждение
-  if (type === 'confirmation' || type === 'typing_status' || type === 'message_read') {
+  // Подтверждение сервера VK: нужно вернуть РОВНО строку из настроек Callback API
+  // (не "ok") — иначе VK не активирует Callback API для нового сообщества.
+  if (type === 'confirmation') {
+    if (!VK_CONFIRMATION_CODE) {
+      console.warn('VK_CONFIRMATION_CODE не задан — подтверждение Callback API, скорее всего, не пройдёт.');
+    }
+    return res.send(VK_CONFIRMATION_CODE || 'ok');
+  }
+
+  // Шумные события — просто подтверждаем без обработки
+  if (type === 'typing_status' || type === 'message_read') {
     return res.send('ok');
   }
 
