@@ -10,13 +10,16 @@ const state = {
     // Сообщения
     message_new: true,
     message_reply: true,
+    message_edit: true,
     message_allow: true,
     message_deny: true,
-    typing_status: false,   // шум
-    message_read: false,    // шум
+    message_typing_state: false,   // шум ("печатает…"); было "typing_status" — несуществующий тип VK, событие никогда не подавлялось
+    message_read: false,           // шум
+    message_event: true,           // нажатие callback-кнопки
 
     // Стена
     wall_post_new: true,
+    wall_post_edit: true,
     wall_repost: true,
     wall_reply_new: true,
     wall_reply_edit: true,
@@ -47,6 +50,7 @@ const state = {
 
     // Маркет
     market_order_new: true,
+    market_order_edit: true,
     market_comment_new: true,
     market_comment_edit: true,
     market_comment_delete: true,
@@ -68,7 +72,11 @@ const state = {
     like_remove: true,
 
     // Лиды
-    lead_forms_new: true
+    lead_forms_new: true,
+
+    // VK Mini Apps / VK Pay
+    app_payload: true,
+    vkpay_transaction: true
   }
 };
 

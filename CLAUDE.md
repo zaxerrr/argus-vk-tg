@@ -79,6 +79,15 @@ above.
 returning static text — it does not run the actual bot logic (long-polling isn't viable in a
 Workers environment). Treat this as a stub/unfinished migration target, not a working deployment.
 
+### VK API reference
+
+`docs/VK_API.md` is the maintained source of truth for the VK API version/base URL in use, the
+Callback API confirmation mechanism, and — most importantly — a table cross-checking every VK
+event type against its `state.eventToggleState` key and `handleVkEvent()` switch `case`. **Update
+that file in the same change** whenever you touch VK event handling (`src/vk/events.js`,
+`src/state.js`, `src/utils.js`, `src/vk/format.js`) — it's what catches the toggle/case drift
+described below before it ships.
+
 ### Adding a new VK event type
 
 1. Add the event type key to `state.eventToggleState` in `src/state.js` (defaults it to
@@ -193,6 +202,15 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
 `fetch`, возвращающей статичный текст — реальная логика бота там не выполняется (long-polling
 невозможна в среде Workers). Считайте это незавершённой целью миграции, а не рабочим
 развёртыванием.
+
+### Справочник по VK API
+
+`docs/VK_API.md` — поддерживаемый источник истины по используемой версии VK API/базовому URL,
+механизму подтверждения Callback API и, самое важное, по таблице соответствия «тип события VK ↔
+ключ в `state.eventToggleState` ↔ `case` в `handleVkEvent()`». **Обновляйте этот файл в том же
+изменении**, где трогаете обработку VK-событий (`src/vk/events.js`, `src/state.js`,
+`src/utils.js`, `src/vk/format.js`) — именно он ловит рассинхронизацию тумблер/case до того, как
+она уедет в прод.
 
 ### Добавление нового типа события VK
 

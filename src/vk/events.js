@@ -153,6 +153,13 @@ async function handleVkEvent({ type, object }) {
       msg = `✏️ Пост: <a href="${link}">обновлён</a>`;
       break;
     }
+    case 'wall_repost': {
+      const p = object;
+      const u = await userLink(p.from_id || p.owner_id);
+      const link = `https://vk.com/wall${p.owner_id}_${p.id}`;
+      msg = `🔁 ${u} сделал(а) репост <a href="${link}">записи</a>`;
+      break;
+    }
     case 'wall_reply_new': {
       const c = object;
       const u = await userLink(c.from_id);

@@ -75,7 +75,7 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   }
 
   // Шумные события — просто подтверждаем без обработки
-  if (type === 'typing_status' || type === 'message_read') {
+  if (type === 'message_typing_state' || type === 'message_read') {
     return res.send('ok');
   }
 

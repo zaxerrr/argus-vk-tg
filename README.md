@@ -22,7 +22,9 @@ structured logging and runtime-configurable event filtering.
   and control the bot at runtime; admin-only commands are gated by Telegram user ID.
 - Logs structured request/response records to a Supabase table for observability.
 
-See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout.
+See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout, and
+[`docs/VK_API.md`](./docs/VK_API.md) for the current VK API version, Callback API confirmation
+mechanism, and the full event-type ↔ toggle ↔ handler mapping.
 
 ### Setup
 
@@ -73,7 +75,9 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
   просмотра и управления ботом в рантайме; админ-команды защищены проверкой Telegram user ID.
 - Пишет структурированные записи запросов/ответов в таблицу Supabase для наблюдаемости.
 
-Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md).
+Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md), а актуальная
+версия VK API, механизм подтверждения Callback API и полная карта событий — в
+[`docs/VK_API.md`](./docs/VK_API.md).
 
 ### Установка
 

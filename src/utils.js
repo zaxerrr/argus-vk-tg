@@ -15,7 +15,7 @@ function escapeHtml(text) {
 async function getVkUserName(userId) {
   try {
     const resp = await axios.get('https://api.vk.com/method/users.get', {
-      params: { user_ids: userId, access_token: VK_SERVICE_KEY, v: '5.131', lang: 'ru' }
+      params: { user_ids: userId, access_token: VK_SERVICE_KEY, v: '5.199', lang: 'ru' }
     });
     const u = resp.data?.response?.[0];
     if (!u) return `ID ${userId}`;
