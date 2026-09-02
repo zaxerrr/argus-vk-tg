@@ -31,14 +31,16 @@ missing: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_CHAT_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (the last two used to be validated
 ad hoc inside `src/lib/db.js`; they're now part of the single `required()` check in
 `src/config.js`, same as everything else). Optional: `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
-`ADMIN_USER_IDS` (comma-separated Telegram user IDs), `BOT_VERSION` (falls back to `package.json`
-version), `PORT` (default 3000). See `.env.example` for a filled-in template and
-`migrations/001_bot_state.sql` for the Supabase schema (`bot_logs`, `bot_state`) both need.
+`STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (forum-topic thread IDs — see
+[Forum topics](#forum-topics-single-supergroup) below), `STATS_DIGEST_HOURS`, `ADMIN_USER_IDS`
+(comma-separated Telegram user IDs), `BOT_VERSION` (falls back to `package.json` version), `PORT`
+(default 3000). See `.env.example` for a filled-in template and `migrations/001_bot_state.sql`
+(plus `002_forum_topics.sql`, `003_stats_views.sql`) for the Supabase schema all of this needs.
 
 ### Request flow (the live code path)
 
 ```
-VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache, 10 min TTL, md5 hash of {type, objectId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendTelegramMessageWithRetry → state.CURRENT_MAIN_CHAT_ID (3 retries, 1s/2s/3s backoff, failures echoed to DEBUG_CHAT_ID and logged via src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache, 10 min TTL, md5 hash of {type, objectId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) resolves the target chat + optional forum-topic message_thread_id (see below) → sendTelegramMessageWithRetry (3 retries, 1s/2s/3s backoff, failures echoed to the "debug" role and logged via src/lib/logger.js)
 ```
 
 Telegram → bot commands are registered in `src/commands.js` via `bot.onText`, using the same
@@ -78,6 +80,37 @@ above.
 `wrangler.jsonc` points to `src/worker.js`, which is currently just a placeholder `fetch` handler
 returning static text — it does not run the actual bot logic (long-polling isn't viable in a
 Workers environment). Treat this as a stub/unfinished migration target, not a working deployment.
+
+### Forum topics (single supergroup)
+
+Notifications are routed by **role** (`main`, `lead`, `debug`, `stats`), not by hardcoded chat ID.
+`resolveRoleTarget(role)` in `src/telegram.js` decides, in order: (1) `main` always goes to
+`state.CURRENT_MAIN_CHAT_ID`; (2) any other role with its own `*_CHAT_ID` env var
+(`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID`) goes to that chat — the original multi-chat setup;
+(3) a role with no dedicated chat but with a configured `message_thread_id` (`state.topics[role]`)
+goes into that **forum topic of the main chat** — the "single supergroup with topics" setup; (4)
+otherwise the role is disabled (no-op), same as leaving `DEBUG_CHAT_ID` unset used to mean. This
+means **the feature is opt-in and backward compatible**: a deployment that never touches topics
+behaves exactly as before.
+
+`sendToRole(role, html, options)` is the high-level sender (`src/vk/events.js`'s `notifyMAIN`/
+`notifyLEAD` and the digest/startup code in `server.js` use it); `sendTelegramMessageWithRetry`
+stays the low-level primitive when you already have a concrete chat ID. Topic IDs are configured
+either via env vars (`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID`, read once into `state.topics` at
+boot) or at runtime via the `/set_topic <role> <thread_id|here|off>` admin command (persisted to
+Supabase `bot_state.topics`, see `migrations/002_forum_topics.sql`); `/topic_id` reports the
+`message_thread_id` of whatever topic it's run in (use it to discover IDs), and `/topics` lists
+the resolved chat+thread per role.
+
+### Statistics over `bot_logs`
+
+`migrations/003_stats_views.sql` defines SQL views over `bot_logs` (rolling-24h aggregates plus
+daily-trend views for ad-hoc analysis/BI). `src/lib/stats.js` queries the rolling views
+(`bot_stats_overview_24h`, `bot_stats_vk_events_last_24h`) and formats a digest; `formatDigest` is
+pure and unit-tested (`test/lib/stats.test.js`). The `/stats` admin command sends it on demand;
+if `STATS_DIGEST_HOURS` is set, `server.js` also posts it automatically on that interval to the
+`stats` role (see Forum topics above) — unset by default, so existing deployments get no new
+automatic messages unless explicitly opted in.
 
 ### VK API reference
 
@@ -151,15 +184,17 @@ Node.js-бот, который принимает события VK Callback API
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (последние
 две раньше проверялись отдельным `throw` внутри `src/lib/db.js`; теперь входят в общий
 `required()`-механизм `src/config.js`, как и остальные). Необязательные: `LEAD_CHAT_ID`,
-`DEBUG_CHAT_ID`, `ADMIN_USER_IDS` (ID пользователей Telegram через запятую), `BOT_VERSION` (по
-умолчанию берётся версия из `package.json`), `PORT` (по умолчанию 3000). См. `.env.example` для
-готового шаблона и `migrations/001_bot_state.sql` для схемы Supabase (`bot_logs`, `bot_state`),
-которая нужна для обеих таблиц.
+`DEBUG_CHAT_ID`, `STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (ID тем форума —
+см. [Темы супергруппы](#темы-forum-topics-единая-супергруппа) ниже), `STATS_DIGEST_HOURS`,
+`ADMIN_USER_IDS` (ID пользователей Telegram через запятую), `BOT_VERSION` (по умолчанию берётся
+версия из `package.json`), `PORT` (по умолчанию 3000). См. `.env.example` для готового шаблона и
+`migrations/001_bot_state.sql` (плюс `002_forum_topics.sql`, `003_stats_views.sql`) для схемы
+Supabase, которая всему этому нужна.
 
 ### Поток обработки запроса (реальный рабочий путь кода)
 
 ```
-VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendTelegramMessageWithRetry → state.CURRENT_MAIN_CHAT_ID (3 попытки, задержки 1с/2с/3с, ошибки дублируются в DEBUG_CHAT_ID и логируются через src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) определяет целевой чат + опциональный message_thread_id темы форума (см. ниже) → sendTelegramMessageWithRetry (3 попытки, задержки 1с/2с/3с, ошибки дублируются в роль "debug" и логируются через src/lib/logger.js)
 ```
 
 Команды Telegram → бот регистрируются в `src/commands.js` через `bot.onText`, используя тот же
@@ -202,6 +237,37 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
 `fetch`, возвращающей статичный текст — реальная логика бота там не выполняется (long-polling
 невозможна в среде Workers). Считайте это незавершённой целью миграции, а не рабочим
 развёртыванием.
+
+### Темы (forum topics), единая супергруппа
+
+Уведомления маршрутизируются по **роли** (`main`, `lead`, `debug`, `stats`), а не по жёстко
+зашитому chat ID. `resolveRoleTarget(role)` в `src/telegram.js` решает по порядку: (1) `main`
+всегда идёт в `state.CURRENT_MAIN_CHAT_ID`; (2) любая другая роль со своей переменной
+`*_CHAT_ID` (`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID`) идёт в этот чат — старая схема с
+несколькими чатами; (3) роль без отдельного чата, но с заданным `message_thread_id`
+(`state.topics[role]`), идёт в **эту тему основного чата** — схема «одна супергруппа с темами»;
+(4) иначе роль отключена (no-op) — так же, как раньше означал незаданный `DEBUG_CHAT_ID`. То
+есть **фича опциональна и обратно совместима**: развёртывание, которое не трогает темы, ведёт
+себя ровно как раньше.
+
+`sendToRole(role, html, options)` — высокоуровневый отправитель (используется `notifyMAIN`/
+`notifyLEAD` в `src/vk/events.js` и кодом дайджеста/стартового сообщения в `server.js`);
+`sendTelegramMessageWithRetry` остаётся низкоуровневым примитивом, когда chat ID уже известен
+явно. ID тем задаются либо через переменные окружения (`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID`,
+читаются один раз в `state.topics` при старте), либо в рантайме командой
+`/set_topic <роль> <thread_id|here|off>` (персистентно в Supabase `bot_state.topics`, см.
+`migrations/002_forum_topics.sql`); `/topic_id` показывает `message_thread_id` темы, в которой
+выполнена — так удобно узнавать ID; `/topics` показывает итоговый чат+тему по каждой роли.
+
+### Статистика над `bot_logs`
+
+`migrations/003_stats_views.sql` определяет SQL-вьюхи над `bot_logs` (скользящие агрегаты за 24ч
+плюс вьюхи дневных трендов для ad-hoc-анализа/BI). `src/lib/stats.js` запрашивает скользящие
+вьюхи (`bot_stats_overview_24h`, `bot_stats_vk_events_last_24h`) и форматирует дайджест;
+`formatDigest` — чистая функция, покрыта тестом (`test/lib/stats.test.js`). Админ-команда
+`/stats` шлёт его по запросу; если задан `STATS_DIGEST_HOURS`, `server.js` также публикует его
+автоматически с этим интервалом в роль `stats` (см. «Темы» выше) — по умолчанию не задан, так что
+у существующих развёртываний новые автоматические сообщения не появляются без явного включения.
 
 ### Справочник по VK API
 

@@ -18,9 +18,13 @@ structured logging and runtime-configurable event filtering.
 - Formats a short HTML notification per event type (new posts, comments, likes with live
   counters, group joins/leaves, market orders, etc.) and sends it to a Telegram chat via
   long-polling.
-- Exposes Telegram bot commands (`/status`, `/toggle_event`, `/set_main_chat`, ...) to inspect
-  and control the bot at runtime; admin-only commands are gated by Telegram user ID.
-- Logs structured request/response records to a Supabase table for observability.
+- Exposes Telegram bot commands (`/status`, `/toggle_event`, `/set_main_chat`, `/set_topic`,
+  `/stats`, ...) to inspect and control the bot at runtime; admin-only commands are gated by
+  Telegram user ID.
+- Routes notifications by role (main/lead/debug/stats) to either separate chats or — if you use a
+  single Telegram supergroup with Forum Topics enabled — distinct topics within it.
+- Logs structured request/response records to a Supabase table for observability, with SQL views
+  for a 24h stats digest (on demand via `/stats`, or automatically if `STATS_DIGEST_HOURS` is set).
 
 See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout, and
 [`docs/VK_API.md`](./docs/VK_API.md) for the current VK API version, Callback API confirmation
@@ -32,14 +36,32 @@ mechanism, and the full event-type ↔ toggle ↔ handler mapping.
 2. Copy `.env.example` to `.env` and fill in the values (see comments in the file for where each
    one comes from). All variables under "Обязательные / Required" are mandatory — the process
    exits with code 1 on boot if any is missing (`src/config.js`).
-3. In your Supabase project's SQL editor, run [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql)
-   once. It creates:
-   - `bot_logs` — structured logs written by `src/lib/logger.js`.
-   - `bot_state` — persists the event on/off toggles and the active Telegram chat ID
-     (`src/state.js`), so they survive restarts instead of resetting to defaults.
+3. In your Supabase project's SQL editor, run, in order:
+   - [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql) — creates `bot_logs`
+     (structured logs, `src/lib/logger.js`) and `bot_state` (persists event on/off toggles and the
+     active Telegram chat ID, `src/state.js`, so they survive restarts).
+   - [`migrations/002_forum_topics.sql`](./migrations/002_forum_topics.sql) — adds persistence for
+     forum-topic thread IDs per notification role (optional feature, see below).
+   - [`migrations/003_stats_views.sql`](./migrations/003_stats_views.sql) — SQL views over
+     `bot_logs` used by `/stats` and the optional digest.
 4. In your VK community settings, point the Callback API at `https://<your-host>/webhook` and set
    the same secret as `VK_SECRET_KEY`.
 5. `npm start`
+
+### Forum topics & stats (optional)
+
+Notifications route by role (`main`/`lead`/`debug`/`stats`) rather than a hardcoded chat. By
+default each role uses its own chat env var (`TELEGRAM_CHAT_ID`/`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/
+`STATS_CHAT_ID`) — same as before. To use a single Telegram supergroup with Forum Topics enabled
+instead: create a topic for each role you want, run `/topic_id` inside it to get its thread ID,
+then either set `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` in `.env` or run
+`/set_topic <role> here` from inside the topic (admin-only). `/topics` shows the resolved
+chat+topic per role. A role with neither a dedicated chat nor a topic is simply disabled, so this
+is fully opt-in. See `CLAUDE.md` for the resolution order.
+
+`/stats` (admin) posts a 24h digest (VK events, Telegram traffic, errors, top VK event types) built
+from the SQL views in `migrations/003_stats_views.sql`. Set `STATS_DIGEST_HOURS` to also post it
+automatically on that interval to the `stats` role.
 
 ### Commands
 
@@ -71,9 +93,14 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
 - Формирует короткое HTML-уведомление под каждый тип события (новые посты, комментарии, лайки
   с актуальным счётчиком, вступления/выходы из группы, заказы в маркете и т.д.) и отправляет его
   в Telegram-чат через long-polling.
-- Предоставляет команды Telegram-бота (`/status`, `/toggle_event`, `/set_main_chat` и др.) для
-  просмотра и управления ботом в рантайме; админ-команды защищены проверкой Telegram user ID.
-- Пишет структурированные записи запросов/ответов в таблицу Supabase для наблюдаемости.
+- Предоставляет команды Telegram-бота (`/status`, `/toggle_event`, `/set_main_chat`,
+  `/set_topic`, `/stats` и др.) для просмотра и управления ботом в рантайме; админ-команды
+  защищены проверкой Telegram user ID.
+- Маршрутизирует уведомления по ролям (main/lead/debug/stats) — либо в отдельные чаты, либо (если
+  используется одна Telegram-супергруппа с включёнными темами) в отдельные темы внутри неё.
+- Пишет структурированные записи запросов/ответов в таблицу Supabase для наблюдаемости, с
+  SQL-вьюхами для дайджеста статистики за 24ч (по запросу `/stats` или автоматически, если задан
+  `STATS_DIGEST_HOURS`).
 
 Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md), а актуальная
 версия VK API, механизм подтверждения Callback API и полная карта событий — в
@@ -85,14 +112,33 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
 2. Скопируйте `.env.example` в `.env` и заполните значения (см. комментарии в файле, откуда их
    брать). Все переменные из раздела «Обязательные» строго обязательны — процесс завершится с
    кодом 1 при старте, если хотя бы одна отсутствует (`src/config.js`).
-3. В SQL-редакторе вашего проекта Supabase выполните один раз
-   [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql). Он создаёт:
-   - `bot_logs` — структурированные логи из `src/lib/logger.js`.
-   - `bot_state` — хранит тумблеры событий и текущий ID основного Telegram-чата (`src/state.js`),
-     чтобы они не сбрасывались к дефолтам при каждом рестарте.
+3. В SQL-редакторе вашего проекта Supabase выполните по порядку:
+   - [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql) — создаёт `bot_logs`
+     (структурированные логи, `src/lib/logger.js`) и `bot_state` (хранит тумблеры событий и
+     текущий ID основного Telegram-чата, `src/state.js`, чтобы они не сбрасывались при рестарте).
+   - [`migrations/002_forum_topics.sql`](./migrations/002_forum_topics.sql) — добавляет
+     персистентность ID тем форума по ролям уведомлений (опциональная фича, см. ниже).
+   - [`migrations/003_stats_views.sql`](./migrations/003_stats_views.sql) — SQL-вьюхи над
+     `bot_logs`, которые использует `/stats` и опциональный автодайджест.
 4. В настройках сообщества VK укажите для Callback API адрес `https://<ваш-хост>/webhook` и тот
    же секрет, что и в `VK_SECRET_KEY`.
 5. `npm start`
+
+### Темы (forum topics) и статистика (опционально)
+
+Уведомления маршрутизируются по роли (`main`/`lead`/`debug`/`stats`), а не по жёстко заданному
+чату. По умолчанию каждая роль использует свою переменную чата (`TELEGRAM_CHAT_ID`/
+`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID`) — как и раньше. Чтобы вместо этого использовать
+одну Telegram-супергруппу с включёнными темами (Forum Topics): создайте тему для каждой нужной
+роли, выполните в ней `/topic_id`, чтобы получить её thread ID, затем либо задайте
+`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` в `.env`, либо выполните `/set_topic <роль> here`
+прямо в теме (только админ). `/topics` покажет итоговый чат+тему по каждой роли. Роль без
+отдельного чата и без темы просто отключена — фича полностью опциональна. Порядок разрешения —
+в `CLAUDE.md`.
+
+`/stats` (админ) публикует дайджест за 24ч (события VK, трафик Telegram, ошибки, топ типов
+событий VK) на основе SQL-вьюх из `migrations/003_stats_views.sql`. Задайте `STATS_DIGEST_HOURS`,
+чтобы дайджест публиковался автоматически с этим интервалом в роль `stats`.
 
 ### Команды
 

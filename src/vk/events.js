@@ -2,9 +2,9 @@
 
 const axios = require('axios');
 const { state, shouldDeliver } = require('../state'); // может быть undefined — см. allowDeliver()
-const { sendTelegramMessageWithRetry } = require('../telegram');
+const { sendToRole } = require('../telegram');
 const { escapeHtml, getVkUserName } = require('../utils');
-const { VK_GROUP_ID, VK_SERVICE_KEY, LEAD_CHAT_ID } = require('../config');
+const { VK_GROUP_ID, VK_SERVICE_KEY } = require('../config');
 const { objNounDative, objNounAblative, absOwner, buildObjectLink, toLikesApiType } = require('./format');
 
 /* ================== вспомогательные функции ================== */
@@ -15,20 +15,14 @@ function allowDeliver(type) {
   return !(Object.prototype.hasOwnProperty.call(m, type) && m[type] === false);
 }
 
-function mainChat() {
-  return state.CURRENT_MAIN_CHAT_ID;
-}
-
 async function notifyMAIN(html) {
-  const chat = mainChat();
-  if (!chat || !html) return;
-  await sendTelegramMessageWithRetry(String(chat), html, { parse_mode: 'HTML' });
+  if (!html) return;
+  await sendToRole('main', html, { parse_mode: 'HTML' });
 }
 
 async function notifyLEAD(html) {
-  const lead = LEAD_CHAT_ID || state.LEAD_CHAT_ID;
-  if (!lead || !html) return;
-  await sendTelegramMessageWithRetry(String(lead), html, { parse_mode: 'HTML' });
+  if (!html) return;
+  await sendToRole('lead', html, { parse_mode: 'HTML' });
 }
 
 async function userLink(id) {

@@ -34,8 +34,22 @@ const SUPABASE_SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
 
 const LEAD_CHAT_ID   = process.env.LEAD_CHAT_ID || null;
 const DEBUG_CHAT_ID  = process.env.DEBUG_CHAT_ID || null;
+const STATS_CHAT_ID  = process.env.STATS_CHAT_ID || null;
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const VK_CONFIRMATION_CODE = process.env.VK_CONFIRMATION_CODE || null;
+
+// Начальные ID тем (message_thread_id) форум-супергруппы по ролям уведомлений — см.
+// src/telegram.js (resolveRoleTarget) и src/state.js (state.topics). Опциональны: без них
+// роль либо шлёт в свой отдельный *_CHAT_ID как раньше, либо (если не задан и *_CHAT_ID) молча
+// отключена. Переопределяются в рантайме через /set_topic и персистентны в bot_state.topics.
+const TELEGRAM_TOPIC_MAIN_ID  = process.env.TELEGRAM_TOPIC_MAIN_ID  || null;
+const TELEGRAM_TOPIC_LEAD_ID  = process.env.TELEGRAM_TOPIC_LEAD_ID  || null;
+const TELEGRAM_TOPIC_DEBUG_ID = process.env.TELEGRAM_TOPIC_DEBUG_ID || null;
+const TELEGRAM_TOPIC_STATS_ID = process.env.TELEGRAM_TOPIC_STATS_ID || null;
+
+// Если задано — раз в N часов бот сам публикует дайджест статистики (src/lib/stats.js) в роль
+// "stats" (см. resolveRoleTarget). Без этой переменной автодайджест выключен, доступен только /stats.
+const STATS_DIGEST_HOURS = process.env.STATS_DIGEST_HOURS ? Number(process.env.STATS_DIGEST_HOURS) : null;
 
 const BOT_VERSION    = process.env.BOT_VERSION || readPackageVersion() || '0.0.0';
 
@@ -47,9 +61,15 @@ module.exports = {
   TELEGRAM_CHAT_ID,
   LEAD_CHAT_ID,
   DEBUG_CHAT_ID,
+  STATS_CHAT_ID,
   ADMIN_USER_IDS,
   BOT_VERSION,
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
-  VK_CONFIRMATION_CODE
+  VK_CONFIRMATION_CODE,
+  TELEGRAM_TOPIC_MAIN_ID,
+  TELEGRAM_TOPIC_LEAD_ID,
+  TELEGRAM_TOPIC_DEBUG_ID,
+  TELEGRAM_TOPIC_STATS_ID,
+  STATS_DIGEST_HOURS
 };

@@ -9,16 +9,17 @@ const {
   VK_SECRET_KEY,
   VK_CONFIRMATION_CODE,
   TELEGRAM_CHAT_ID,
-  DEBUG_CHAT_ID,
-  BOT_VERSION
+  BOT_VERSION,
+  STATS_DIGEST_HOURS
 } = require('./src/config');
 
-const { bot, sendTelegramMessageWithRetry } = require('./src/telegram');
+const { bot, sendToRole } = require('./src/telegram');
 const { registerCommands } = require('./src/commands');
 const { shouldProcessEvent, rememberEvent } = require('./src/vk/dedup');
 const { handleVkEvent } = require('./src/vk/events');
 const { loadPersistedState } = require('./src/state');
 const { createRateLimiter } = require('./src/security/rateLimit');
+const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./src/lib/stats');
 
 // Логгер Supabase
 const { withRequestId, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
@@ -34,6 +35,20 @@ global.__BOT_STARTED_AT = new Date();
 
 // Регистрация команд
 registerCommands(bot);
+
+// Периодический дайджест статистики (опционально) — см. src/lib/stats.js и роль "stats"
+// в src/telegram.js. Без STATS_DIGEST_HOURS автодайджест выключен, доступна только /stats.
+if (STATS_DIGEST_HOURS) {
+  const intervalMs = STATS_DIGEST_HOURS * 60 * 60 * 1000;
+  setInterval(async () => {
+    try {
+      const [overview, top] = await Promise.all([getOverview24h(), getTopVkEventTypes(10)]);
+      await sendToRole('stats', formatDigest(overview, top), { parse_mode: 'HTML' });
+    } catch (e) {
+      logError('stats', 'digest_failed', e);
+    }
+  }, intervalMs).unref();
+}
 
 // Проверка состояния
 app.get('/health', async (req, res) => {
@@ -96,9 +111,7 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   } catch (e) {
     console.error('Ошибка обработки VK-события:', e.message);
     logError('vk', 'handle_event_failed', e, { request_id: req.requestId, payload: { type } });
-    if (DEBUG_CHAT_ID) {
-      await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, `❌ Ошибка: ${e.message}`);
-    }
+    await sendToRole('debug', `❌ Ошибка: ${e.message}`);
   }
 });
 
@@ -122,21 +135,19 @@ let server;
   server = app.listen(PORT, async () => {
     logger.info({ source: 'system', event: 'boot', summary: `Bot v${BOT_VERSION} started`, payload: { port: PORT } });
     console.log(`[${new Date().toISOString()}] Сервер на порту ${PORT}`);
-    // стартовое сообщение в DEBUG
-    if (DEBUG_CHAT_ID) {
-      const communityUrl = `https://vk.com/public${VK_GROUP_ID}`;
-      const mainChatId = String(TELEGRAM_CHAT_ID);
-      const mainChatPublicId = mainChatId.startsWith('-100') ? mainChatId.slice(4) : mainChatId.replace('-', '');
-      const mainChatUrl = `https://t.me/c/${mainChatPublicId}`;
-      const lines = [
-        '🟢 Система запущена!',
-        `Сообщество: <a href="${communityUrl}">${communityUrl}</a>`,
-        `Версия: ${BOT_VERSION}`,
-        `Время (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
-        `Основной чат: <a href="${mainChatUrl}">${mainChatUrl}</a>`
-      ];
-      await sendTelegramMessageWithRetry(DEBUG_CHAT_ID, lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
-    }
+    // стартовое сообщение в роль "debug" (не отправляется, если роль не сконфигурирована)
+    const communityUrl = `https://vk.com/public${VK_GROUP_ID}`;
+    const mainChatId = String(TELEGRAM_CHAT_ID);
+    const mainChatPublicId = mainChatId.startsWith('-100') ? mainChatId.slice(4) : mainChatId.replace('-', '');
+    const mainChatUrl = `https://t.me/c/${mainChatPublicId}`;
+    const lines = [
+      '🟢 Система запущена!',
+      `Сообщество: <a href="${communityUrl}">${communityUrl}</a>`,
+      `Версия: ${BOT_VERSION}`,
+      `Время (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
+      `Основной чат: <a href="${mainChatUrl}">${mainChatUrl}</a>`
+    ];
+    await sendToRole('debug', lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
   });
 })();
 

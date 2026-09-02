@@ -1,9 +1,25 @@
-// src/state.js — состояние бота: тумблеры событий, основной чат, админы
+// src/state.js — состояние бота: тумблеры событий, основной чат, темы супергруппы, админы
 
-const { TELEGRAM_CHAT_ID, ADMIN_USER_IDS } = require('./config');
+const {
+  TELEGRAM_CHAT_ID, ADMIN_USER_IDS,
+  TELEGRAM_TOPIC_MAIN_ID, TELEGRAM_TOPIC_LEAD_ID, TELEGRAM_TOPIC_DEBUG_ID, TELEGRAM_TOPIC_STATS_ID
+} = require('./config');
+
+// Роли уведомлений, которые можно привязать к теме (message_thread_id) форум-супергруппы —
+// см. resolveRoleTarget() в src/telegram.js.
+const TOPIC_ROLES = ['main', 'lead', 'debug', 'stats'];
 
 const state = {
   CURRENT_MAIN_CHAT_ID: TELEGRAM_CHAT_ID,
+
+  // message_thread_id по ролям (null = без темы). Задаются через переменные окружения при
+  // первом старте и/или командой /set_topic в рантайме (персистентны в bot_state.topics).
+  topics: {
+    main:  TELEGRAM_TOPIC_MAIN_ID  ? Number(TELEGRAM_TOPIC_MAIN_ID)  : null,
+    lead:  TELEGRAM_TOPIC_LEAD_ID  ? Number(TELEGRAM_TOPIC_LEAD_ID)  : null,
+    debug: TELEGRAM_TOPIC_DEBUG_ID ? Number(TELEGRAM_TOPIC_DEBUG_ID) : null,
+    stats: TELEGRAM_TOPIC_STATS_ID ? Number(TELEGRAM_TOPIC_STATS_ID) : null
+  },
 
   // Максимально полный набор известных типов VK
   eventToggleState: {
@@ -95,6 +111,15 @@ function setMainChat(id) {
   persist();
 }
 
+// Возвращает: undefined — неизвестная роль (ничего не изменено); иначе новое значение темы
+// этой роли (число, либо null если тему сбросили на "без темы"/General).
+function setTopic(role, threadId) {
+  if (!TOPIC_ROLES.includes(role)) return undefined;
+  state.topics[role] = (threadId === null || threadId === undefined) ? null : Number(threadId);
+  persist();
+  return state.topics[role];
+}
+
 function toggleEvent(type) {
   if (!(type in state.eventToggleState)) return null;
   state.eventToggleState[type] = !state.eventToggleState[type];
@@ -123,5 +148,7 @@ module.exports = {
   isAdmin,
   setMainChat,
   toggleEvent,
+  setTopic,
+  TOPIC_ROLES,
   loadPersistedState
 };
