@@ -1,12 +1,21 @@
 
 // src/lib/db.js (CommonJS)
-// Минимальный Supabase-клиент для серверного использования с ключом Service Role.
-const { createClient } = require('@supabase/supabase-js');
-const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = require('../config');
+// Инициализация Firebase Admin SDK и клиента Firestore.
+const admin = require('firebase-admin');
+const { FIREBASE_SERVICE_ACCOUNT } = require('../config');
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
-  db: { schema: 'public' },
-});
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(FIREBASE_SERVICE_ACCOUNT);
+} catch (e) {
+  console.error('FIREBASE_SERVICE_ACCOUNT содержит невалидный JSON:', e.message);
+  process.exit(1);
+}
 
-module.exports = { supabase };
+if (!admin.apps.length) {
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+}
+
+const db = admin.firestore();
+
+module.exports = { admin, db };

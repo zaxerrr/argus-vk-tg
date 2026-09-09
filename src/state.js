@@ -100,7 +100,7 @@ function isAdmin(id) {
   return ADMIN_USER_IDS.includes(String(id));
 }
 
-// stateStore лениво импортируется, чтобы не тянуть Supabase-клиент туда, где state.js
+// stateStore лениво импортируется, чтобы не тянуть Firebase Admin SDK туда, где state.js
 // используется только для чтения тумблеров (например, из тестов).
 function persist() {
   require('./lib/stateStore').saveState(state).catch(() => {});

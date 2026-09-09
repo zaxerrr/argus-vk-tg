@@ -28,14 +28,14 @@ formatted notifications to Telegram via long-polling (`node-telegram-bot-api`). 
 
 `server.js` boots through `src/config.js`, which calls `process.exit(1)` if any of these are
 missing: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`, `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_CHAT_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (the last two used to be validated
-ad hoc inside `src/lib/db.js`; they're now part of the single `required()` check in
-`src/config.js`, same as everything else). Optional: `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
+`TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (the full JSON of a Firebase service-account key,
+as one string — see `docs/FIREBASE_SETUP.md`). Optional: `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
 `STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (forum-topic thread IDs — see
 [Forum topics](#forum-topics-single-supergroup) below), `STATS_DIGEST_HOURS`, `ADMIN_USER_IDS`
 (comma-separated Telegram user IDs), `BOT_VERSION` (falls back to `package.json` version), `PORT`
-(default 3000). See `.env.example` for a filled-in template and `migrations/001_bot_state.sql`
-(plus `002_forum_topics.sql`, `003_stats_views.sql`) for the Supabase schema all of this needs.
+(default 3000, but hosting providers that inject their own `PORT` — e.g. Render — take priority).
+See `.env.example` for a filled-in template. No migrations to run: Firestore collections/documents
+are created on first write (`docs/FIREBASE_SETUP.md` lists what gets created and by which module).
 
 ### Request flow (the live code path)
 
@@ -48,11 +48,12 @@ long-polling `bot` instance from `src/telegram.js`. Admin-only commands check
 `isAdmin()` (`src/state.js`) against `ADMIN_USER_IDS`.
 
 The dedup cache is still in-process memory only (resets on restart — acceptable, since duplicates
-are only a risk within VK's short retry window). `eventToggleState` and `CURRENT_MAIN_CHAT_ID`,
-however, are persisted to the Supabase `bot_state` table via `src/lib/stateStore.js`: loaded once
-on boot (`loadPersistedState()`, awaited before `app.listen`) and saved on every
-`toggleEvent()`/`setMainChat()` call. If Supabase is unreachable, load/save fail silently (logged,
-not thrown) and the in-memory defaults from `src/state.js` are used for that run.
+are only a risk within VK's short retry window). `eventToggleState`, `CURRENT_MAIN_CHAT_ID`, and
+`topics`, however, are persisted to the Firestore document `bot_state/main` via
+`src/lib/stateStore.js`: loaded once on boot (`loadPersistedState()`, awaited before `app.listen`)
+and saved on every `toggleEvent()`/`setMainChat()`/`setTopic()` call. If Firestore is unreachable,
+load/save fail silently (logged, not thrown) and the in-memory defaults from `src/state.js` are
+used for that run.
 
 ### Important: two dead/unwired code paths
 
@@ -67,9 +68,11 @@ them in (or ask before doing so):
 - **`src/lib/events.js` and `src/storage/{firebase,redis,supabase}.js`** — written as ES modules
   (`import`/`export`) in a project that is otherwise CommonJS (`require`/`module.exports`, no
   `"type": "module"` in `package.json`). They also depend on `pino` and `@upstash/redis`, neither
-  of which is in `package.json`'s dependencies. Loading these via `require()` will throw. Only
-  `src/lib/db.js` and `src/lib/logger.js` (both CommonJS, Supabase-backed) are actually wired into
-  `server.js`, for structured request/response logging to a `bot_logs` Supabase table.
+  of which is in `package.json`'s dependencies. Loading these via `require()` will throw. Note
+  `src/storage/firebase.js` specifically: despite the name, it is **not** related to the live
+  Firebase integration — the real one is `src/lib/db.js` (CommonJS, `firebase-admin`). Only
+  `src/lib/db.js` and `src/lib/logger.js` are actually wired into `server.js`, for structured
+  request/response logging to the `bot_logs` Firestore collection.
 
 If asked to work on logging, dedup, or event-forwarding logic, the source of truth is
 `src/vk/events.js`, `src/vk/dedup.js`, `src/lib/logger.js`, and `src/lib/db.js` — not the files
@@ -98,19 +101,24 @@ behaves exactly as before.
 stays the low-level primitive when you already have a concrete chat ID. Topic IDs are configured
 either via env vars (`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID`, read once into `state.topics` at
 boot) or at runtime via the `/set_topic <role> <thread_id|here|off>` admin command (persisted to
-Supabase `bot_state.topics`, see `migrations/002_forum_topics.sql`); `/topic_id` reports the
+the Firestore document `bot_state/main`, field `topics`); `/topic_id` reports the
 `message_thread_id` of whatever topic it's run in (use it to discover IDs), and `/topics` lists
 the resolved chat+thread per role.
 
-### Statistics over `bot_logs`
+### Statistics (`src/lib/stats.js`)
 
-`migrations/003_stats_views.sql` defines SQL views over `bot_logs` (rolling-24h aggregates plus
-daily-trend views for ad-hoc analysis/BI). `src/lib/stats.js` queries the rolling views
-(`bot_stats_overview_24h`, `bot_stats_vk_events_last_24h`) and formats a digest; `formatDigest` is
-pure and unit-tested (`test/lib/stats.test.js`). The `/stats` admin command sends it on demand;
-if `STATS_DIGEST_HOURS` is set, `server.js` also posts it automatically on that interval to the
-`stats` role (see Forum topics above) — unset by default, so existing deployments get no new
-automatic messages unless explicitly opted in.
+No SQL views here (Firestore is NoSQL) — instead, `bumpStatsCounters()` atomically increments
+fields on today's `stats_daily/<YYYY-MM-DD>` (UTC) document every time `src/lib/logger.js` writes a
+log record, keyed off `source`/`event`/`level`; VK event types go into a `vk_event_types` map
+(field-path segment sanitized against the untrusted webhook `type` before use — see the function's
+comment). This means `/stats` is a **calendar-day counter reset at UTC midnight**, not the old
+Supabase version's rolling 24-hour SQL aggregate — deliberate trade-off for minimal Firestore
+reads/writes on the free (Spark) tier; no historical/daily-trend queries. `getOverview24h()` /
+`getTopVkEventTypes()` read that one document; `formatDigest` is pure and unit-tested
+(`test/lib/stats.test.js`). The `/stats` admin command sends it on demand; if `STATS_DIGEST_HOURS`
+is set, `server.js` also posts it automatically on that interval to the `stats` role (see Forum
+topics above) — unset by default, so existing deployments get no new automatic messages unless
+explicitly opted in.
 
 ### VK API reference
 
@@ -181,15 +189,15 @@ Node.js-бот, который принимает события VK Callback API
 
 `server.js` запускается через `src/config.js`, который вызывает `process.exit(1)`, если
 отсутствует хотя бы одна из переменных: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`,
-`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (последние
-две раньше проверялись отдельным `throw` внутри `src/lib/db.js`; теперь входят в общий
-`required()`-механизм `src/config.js`, как и остальные). Необязательные: `LEAD_CHAT_ID`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (весь JSON сервисного
+аккаунта Firebase одной строкой — см. `docs/FIREBASE_SETUP.md`). Необязательные: `LEAD_CHAT_ID`,
 `DEBUG_CHAT_ID`, `STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (ID тем форума —
 см. [Темы супергруппы](#темы-forum-topics-единая-супергруппа) ниже), `STATS_DIGEST_HOURS`,
 `ADMIN_USER_IDS` (ID пользователей Telegram через запятую), `BOT_VERSION` (по умолчанию берётся
-версия из `package.json`), `PORT` (по умолчанию 3000). См. `.env.example` для готового шаблона и
-`migrations/001_bot_state.sql` (плюс `002_forum_topics.sql`, `003_stats_views.sql`) для схемы
-Supabase, которая всему этому нужна.
+версия из `package.json`), `PORT` (по умолчанию 3000, но хостинги со своим `PORT` — например,
+Render — имеют приоритет). См. `.env.example` для готового шаблона. Миграции запускать не нужно:
+коллекции/документы Firestore создаются при первой записи (что и каким модулем создаётся —
+`docs/FIREBASE_SETUP.md`).
 
 ### Поток обработки запроса (реальный рабочий путь кода)
 
@@ -202,12 +210,12 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
 `isAdmin()` (`src/state.js`) по списку `ADMIN_USER_IDS`.
 
 Кэш дедупликации по-прежнему живёт только в памяти процесса и сбрасывается при рестарте (это
-приемлемо — дубликаты возможны только в коротком окне повторов VK). А вот `eventToggleState` и
-`CURRENT_MAIN_CHAT_ID` теперь персистентны — хранятся в таблице Supabase `bot_state` через
-`src/lib/stateStore.js`: загружаются один раз при старте (`loadPersistedState()`, ожидается перед
-`app.listen`) и сохраняются при каждом вызове `toggleEvent()`/`setMainChat()`. Если Supabase
-недоступен, загрузка/сохранение молча падают (с логированием, без исключения), и на этот запуск
-используются дефолты из `src/state.js`.
+приемлемо — дубликаты возможны только в коротком окне повторов VK). А вот `eventToggleState`,
+`CURRENT_MAIN_CHAT_ID` и `topics` теперь персистентны — хранятся в документе Firestore
+`bot_state/main` через `src/lib/stateStore.js`: загружаются один раз при старте
+(`loadPersistedState()`, ожидается перед `app.listen`) и сохраняются при каждом вызове
+`toggleEvent()`/`setMainChat()`/`setTopic()`. Если Firestore недоступен, загрузка/сохранение молча
+падают (с логированием, без исключения), и на этот запуск используются дефолты из `src/state.js`.
 
 ### Важно: два «мёртвых»/неподключённых участка кода
 
@@ -223,9 +231,10 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
   (`import`/`export`) в проекте, который в остальном использует CommonJS (`require`/
   `module.exports`, в `package.json` нет `"type": "module"`). Они также зависят от `pino` и
   `@upstash/redis`, которых нет среди зависимостей в `package.json`. Загрузка этих файлов через
-  `require()` приведёт к ошибке. В `server.js` реально подключены только `src/lib/db.js` и
-  `src/lib/logger.js` (оба на CommonJS, работают через Supabase) — для структурированного
-  логирования запросов/ответов в таблицу `bot_logs` в Supabase.
+  `require()` приведёт к ошибке. Отдельно: `src/storage/firebase.js`, несмотря на название, **не
+  связан** с реальной интеграцией Firebase — настоящая живёт в `src/lib/db.js` (CommonJS,
+  `firebase-admin`). В `server.js` реально подключены только `src/lib/db.js` и `src/lib/logger.js`
+  — для структурированного логирования запросов/ответов в коллекцию Firestore `bot_logs`.
 
 Если стоит задача по логированию, дедупликации или пересылке событий — источником истины являются
 `src/vk/events.js`, `src/vk/dedup.js`, `src/lib/logger.js` и `src/lib/db.js`, а не файлы, указанные
@@ -255,17 +264,22 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
 `sendTelegramMessageWithRetry` остаётся низкоуровневым примитивом, когда chat ID уже известен
 явно. ID тем задаются либо через переменные окружения (`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID`,
 читаются один раз в `state.topics` при старте), либо в рантайме командой
-`/set_topic <роль> <thread_id|here|off>` (персистентно в Supabase `bot_state.topics`, см.
-`migrations/002_forum_topics.sql`); `/topic_id` показывает `message_thread_id` темы, в которой
-выполнена — так удобно узнавать ID; `/topics` показывает итоговый чат+тему по каждой роли.
+`/set_topic <роль> <thread_id|here|off>` (персистентно в документе Firestore `bot_state/main`,
+поле `topics`); `/topic_id` показывает `message_thread_id` темы, в которой выполнена — так удобно
+узнавать ID; `/topics` показывает итоговый чат+тему по каждой роли.
 
-### Статистика над `bot_logs`
+### Статистика (`src/lib/stats.js`)
 
-`migrations/003_stats_views.sql` определяет SQL-вьюхи над `bot_logs` (скользящие агрегаты за 24ч
-плюс вьюхи дневных трендов для ad-hoc-анализа/BI). `src/lib/stats.js` запрашивает скользящие
-вьюхи (`bot_stats_overview_24h`, `bot_stats_vk_events_last_24h`) и форматирует дайджест;
-`formatDigest` — чистая функция, покрыта тестом (`test/lib/stats.test.js`). Админ-команда
-`/stats` шлёт его по запросу; если задан `STATS_DIGEST_HOURS`, `server.js` также публикует его
+SQL-вьюх здесь нет (Firestore — NoSQL): вместо них `bumpStatsCounters()` атомарно инкрементирует
+поля в документе `stats_daily/<YYYY-MM-DD>` (UTC) за сегодня при каждой записи лога в
+`src/lib/logger.js`, ориентируясь на `source`/`event`/`level`; типы событий VK попадают в карту
+`vk_event_types` (сегмент пути поля санитизируется против недоверенного `type` из вебхука — см.
+комментарий у функции). Это значит, что `/stats` — **счётчик за календарные сутки, обнуляемый в
+полночь UTC**, а не скользящий 24-часовой SQL-агрегат прежней Supabase-версии — осознанный
+компромисс ради минимума чтений/записей на бесплатном (Spark) тарифе Firestore; истории/дневных
+трендов больше нет. `getOverview24h()`/`getTopVkEventTypes()` читают этот один документ;
+`formatDigest` — чистая функция, покрыта тестом (`test/lib/stats.test.js`). Админ-команда `/stats`
+шлёт его по запросу; если задан `STATS_DIGEST_HOURS`, `server.js` также публикует его
 автоматически с этим интервалом в роль `stats` (см. «Темы» выше) — по умолчанию не задан, так что
 у существующих развёртываний новые автоматические сообщения не появляются без явного включения.
 

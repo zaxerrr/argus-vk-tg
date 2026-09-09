@@ -21,9 +21,9 @@ const { loadPersistedState } = require('./src/state');
 const { createRateLimiter } = require('./src/security/rateLimit');
 const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./src/lib/stats');
 
-// Логгер Supabase
+// Логгер Firestore
 const { withRequestId, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
-const { supabase } = require('./src/lib/db');
+const { db } = require('./src/lib/db');
 
 const app = express();
 
@@ -54,17 +54,17 @@ if (STATS_DIGEST_HOURS) {
 app.get('/health', async (req, res) => {
   const up = Math.floor((Date.now() - (global.__BOT_STARTED_AT?.getTime() || Date.now())) / 1000);
 
-  let supabaseOk = false;
+  let firestoreOk = false;
   try {
-    const ping = supabase.from('bot_logs').select('id', { count: 'exact', head: true }).limit(1);
+    const ping = db.collection('bot_logs').limit(1).get();
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
-    const { error } = await Promise.race([ping, timeout.then(() => ({ error: new Error('timeout') }))]);
-    supabaseOk = !error;
+    await Promise.race([ping, timeout]);
+    firestoreOk = true;
   } catch (_) {
-    supabaseOk = false;
+    firestoreOk = false;
   }
 
-  res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString(), supabase: supabaseOk });
+  res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString(), firestore: firestoreOk });
 });
 
 // Вебхук VK

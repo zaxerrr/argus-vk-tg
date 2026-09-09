@@ -1,0 +1,57 @@
+# render.yaml — Render Blueprint. Deploy: render.com -> New -> Blueprint -> выбрать этот репозиторий/форк.
+# Render сам создаёт сервис по этому файлу и просит заполнить переменные без sync: false ниже.
+#
+# ВАЖНО про бесплатный план (free): сервис "засыпает" после ~15 минут без входящих HTTP-запросов.
+# Пока он спит, не работает не только /webhook (первый запрос после сна — с задержкой ~30-60с на
+# "пробуждение"), но и long-polling Telegram-бота (это отдельный процесс внутри того же контейнера
+# — контейнер целиком останавливается). Для тестового контура с редкими событиями это может быть
+# приемлемо, но если нужна надёжная доставка — либо перейдите на платный план (Starter, не спит),
+# либо настройте внешний пинг GET /health раз в 5-10 минут (например, бесплатный UptimeRobot) —
+# см. docs/FIREBASE_SETUP.md про то, чтобы не пинговать слишком часто (расходует квоту Firestore).
+
+services:
+  - type: web
+    name: argus-vk-tg
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: VK_GROUP_ID
+        sync: false
+      - key: VK_SECRET_KEY
+        sync: false
+      - key: VK_SERVICE_KEY
+        sync: false
+      - key: VK_CONFIRMATION_CODE
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: LEAD_CHAT_ID
+        sync: false
+      - key: DEBUG_CHAT_ID
+        sync: false
+      - key: STATS_CHAT_ID
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: TELEGRAM_TOPIC_MAIN_ID
+        sync: false
+      - key: TELEGRAM_TOPIC_LEAD_ID
+        sync: false
+      - key: TELEGRAM_TOPIC_DEBUG_ID
+        sync: false
+      - key: TELEGRAM_TOPIC_STATS_ID
+        sync: false
+      - key: STATS_DIGEST_HOURS
+        sync: false
+      - key: BOT_VERSION
+        sync: false

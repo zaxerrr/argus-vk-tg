@@ -23,12 +23,13 @@ structured logging and runtime-configurable event filtering.
   Telegram user ID.
 - Routes notifications by role (main/lead/debug/stats) to either separate chats or — if you use a
   single Telegram supergroup with Forum Topics enabled — distinct topics within it.
-- Logs structured request/response records to a Supabase table for observability, with SQL views
-  for a 24h stats digest (on demand via `/stats`, or automatically if `STATS_DIGEST_HOURS` is set).
+- Logs structured request/response records to Firestore for observability, with a real-time stats
+  digest (on demand via `/stats`, or automatically if `STATS_DIGEST_HOURS` is set).
 
-See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout, and
+See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout,
 [`docs/VK_API.md`](./docs/VK_API.md) for the current VK API version, Callback API confirmation
-mechanism, and the full event-type ↔ toggle ↔ handler mapping.
+mechanism, and the full event-type ↔ toggle ↔ handler mapping, and
+[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) for setting up the Firebase project.
 
 ### Setup
 
@@ -36,17 +37,23 @@ mechanism, and the full event-type ↔ toggle ↔ handler mapping.
 2. Copy `.env.example` to `.env` and fill in the values (see comments in the file for where each
    one comes from). All variables under "Обязательные / Required" are mandatory — the process
    exits with code 1 on boot if any is missing (`src/config.js`).
-3. In your Supabase project's SQL editor, run, in order:
-   - [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql) — creates `bot_logs`
-     (structured logs, `src/lib/logger.js`) and `bot_state` (persists event on/off toggles and the
-     active Telegram chat ID, `src/state.js`, so they survive restarts).
-   - [`migrations/002_forum_topics.sql`](./migrations/002_forum_topics.sql) — adds persistence for
-     forum-topic thread IDs per notification role (optional feature, see below).
-   - [`migrations/003_stats_views.sql`](./migrations/003_stats_views.sql) — SQL views over
-     `bot_logs` used by `/stats` and the optional digest.
+3. Set up Firebase (free Spark plan is enough) — full walkthrough in
+   [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md): create a project, enable Firestore
+   (Native mode), generate a service-account key, and put its JSON content into
+   `FIREBASE_SERVICE_ACCOUNT`. No migrations to run — collections/documents are created on first
+   write.
 4. In your VK community settings, point the Callback API at `https://<your-host>/webhook` and set
    the same secret as `VK_SECRET_KEY`.
 5. `npm start`
+
+### Deploying
+
+[`render.yaml`](./render.yaml) is a ready-to-use [Render](https://render.com) Blueprint (free
+tier) — Render dashboard → New → Blueprint → pick this repo/fork, then fill in the env vars it
+prompts for. Note the free plan's web services sleep after ~15 minutes with no inbound HTTP
+traffic, which also pauses the bot's Telegram long-polling loop (the whole container stops) — see
+the comment at the top of `render.yaml` for the trade-off and a keep-alive workaround. Any other
+Node.js host works too, as long as it runs `npm start` and forwards its own `PORT`.
 
 ### Forum topics & stats (optional)
 
@@ -59,9 +66,10 @@ then either set `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` in `.env` or run
 chat+topic per role. A role with neither a dedicated chat nor a topic is simply disabled, so this
 is fully opt-in. See `CLAUDE.md` for the resolution order.
 
-`/stats` (admin) posts a 24h digest (VK events, Telegram traffic, errors, top VK event types) built
-from the SQL views in `migrations/003_stats_views.sql`. Set `STATS_DIGEST_HOURS` to also post it
-automatically on that interval to the `stats` role.
+`/stats` (admin) posts a digest (VK events, Telegram traffic, errors, top VK event types) for
+**today (UTC calendar day)** — real-time Firestore counters, not a rolling 24h window (see
+`src/lib/stats.js`). Set `STATS_DIGEST_HOURS` to also post it automatically on that interval to
+the `stats` role.
 
 ### Commands
 
@@ -71,8 +79,8 @@ automatically on that interval to the `stats` role.
 
 ### Health check
 
-`GET /health` returns `{ ok, uptime_sec, ts, supabase }` — `supabase` reflects a live (2s-timeout)
-connectivity check against the `bot_logs` table, useful for readiness probes.
+`GET /health` returns `{ ok, uptime_sec, ts, firestore }` — `firestore` reflects a live
+(2s-timeout) connectivity check against the `bot_logs` collection, useful for readiness probes.
 
 ### Known limitations
 
@@ -80,7 +88,11 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
   a given bot token at a time — running two causes a 409 conflict from Telegram.
 - `handlers/`, `utils/index.js`, `src/lib/events.js`, and `src/storage/{firebase,redis,supabase}.js`
   are unwired legacy/scaffold code, not part of the running bot — see `CLAUDE.md` for details.
+  (`src/storage/firebase.js` is not the live Firebase integration despite the name — that's
+  `src/lib/db.js`.)
 - `src/worker.js` / `wrangler.jsonc` are an unfinished Cloudflare Worker migration stub.
+- `/stats` resets at UTC midnight (calendar-day counters) rather than a true rolling 24h window —
+  see `src/lib/stats.js`.
 
 ---
 
@@ -98,13 +110,13 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
   защищены проверкой Telegram user ID.
 - Маршрутизирует уведомления по ролям (main/lead/debug/stats) — либо в отдельные чаты, либо (если
   используется одна Telegram-супергруппа с включёнными темами) в отдельные темы внутри неё.
-- Пишет структурированные записи запросов/ответов в таблицу Supabase для наблюдаемости, с
-  SQL-вьюхами для дайджеста статистики за 24ч (по запросу `/stats` или автоматически, если задан
-  `STATS_DIGEST_HOURS`).
+- Пишет структурированные записи запросов/ответов в Firestore для наблюдаемости, со статистикой
+  в реальном времени (по запросу `/stats` или автоматически, если задан `STATS_DIGEST_HOURS`).
 
-Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md), а актуальная
+Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md), актуальная
 версия VK API, механизм подтверждения Callback API и полная карта событий — в
-[`docs/VK_API.md`](./docs/VK_API.md).
+[`docs/VK_API.md`](./docs/VK_API.md), а настройка проекта Firebase — в
+[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md).
 
 ### Установка
 
@@ -112,17 +124,24 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
 2. Скопируйте `.env.example` в `.env` и заполните значения (см. комментарии в файле, откуда их
    брать). Все переменные из раздела «Обязательные» строго обязательны — процесс завершится с
    кодом 1 при старте, если хотя бы одна отсутствует (`src/config.js`).
-3. В SQL-редакторе вашего проекта Supabase выполните по порядку:
-   - [`migrations/001_bot_state.sql`](./migrations/001_bot_state.sql) — создаёт `bot_logs`
-     (структурированные логи, `src/lib/logger.js`) и `bot_state` (хранит тумблеры событий и
-     текущий ID основного Telegram-чата, `src/state.js`, чтобы они не сбрасывались при рестарте).
-   - [`migrations/002_forum_topics.sql`](./migrations/002_forum_topics.sql) — добавляет
-     персистентность ID тем форума по ролям уведомлений (опциональная фича, см. ниже).
-   - [`migrations/003_stats_views.sql`](./migrations/003_stats_views.sql) — SQL-вьюхи над
-     `bot_logs`, которые использует `/stats` и опциональный автодайджест.
+3. Настройте Firebase (бесплатного тарифа Spark достаточно) — полная инструкция в
+   [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md): создать проект, включить Firestore
+   (Native mode), сгенерировать ключ сервисного аккаунта и вставить его JSON в
+   `FIREBASE_SERVICE_ACCOUNT`. Миграции запускать не нужно — коллекции/документы создаются при
+   первой записи.
 4. В настройках сообщества VK укажите для Callback API адрес `https://<ваш-хост>/webhook` и тот
    же секрет, что и в `VK_SECRET_KEY`.
 5. `npm start`
+
+### Деплой
+
+[`render.yaml`](./render.yaml) — готовый Blueprint для [Render](https://render.com) (бесплатный
+тариф): в дашборде Render → New → Blueprint → выбрать этот репозиторий/форк, затем заполнить
+переменные, которые он запросит. На бесплатном тарифе веб-сервис «засыпает» примерно через 15
+минут без входящих HTTP-запросов, что также останавливает long-polling бота (контейнер целиком
+останавливается) — компромисс и обходной путь (keep-alive) описаны в комментарии в начале
+`render.yaml`. Подойдёт и любой другой Node.js-хостинг — достаточно, чтобы он запускал
+`npm start` и передавал свой `PORT`.
 
 ### Темы (forum topics) и статистика (опционально)
 
@@ -136,9 +155,10 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
 отдельного чата и без темы просто отключена — фича полностью опциональна. Порядок разрешения —
 в `CLAUDE.md`.
 
-`/stats` (админ) публикует дайджест за 24ч (события VK, трафик Telegram, ошибки, топ типов
-событий VK) на основе SQL-вьюх из `migrations/003_stats_views.sql`. Задайте `STATS_DIGEST_HOURS`,
-чтобы дайджест публиковался автоматически с этим интервалом в роль `stats`.
+`/stats` (админ) публикует дайджест (события VK, трафик Telegram, ошибки, топ типов событий VK)
+за **сегодня (календарные сутки UTC)** — счётчики Firestore в реальном времени, а не скользящее
+окно 24ч (см. `src/lib/stats.js`). Задайте `STATS_DIGEST_HOURS`, чтобы дайджест публиковался
+автоматически с этим интервалом в роль `stats`.
 
 ### Команды
 
@@ -148,8 +168,8 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
 
 ### Health-check
 
-`GET /health` возвращает `{ ok, uptime_sec, ts, supabase }` — поле `supabase` отражает живую
-проверку связи с таблицей `bot_logs` (с таймаутом 2с), полезно для readiness-проб.
+`GET /health` возвращает `{ ok, uptime_sec, ts, firestore }` — поле `firestore` отражает живую
+проверку связи с коллекцией `bot_logs` (с таймаутом 2с), полезно для readiness-проб.
 
 ### Известные ограничения
 
@@ -157,4 +177,8 @@ connectivity check against the `bot_logs` table, useful for readiness probes.
   один** инстанс — два одновременно вызовут конфликт 409 от Telegram.
 - `handlers/`, `utils/index.js`, `src/lib/events.js` и `src/storage/{firebase,redis,supabase}.js` —
   неподключённый старый/заготовочный код, не часть работающего бота — подробности в `CLAUDE.md`.
+  (`src/storage/firebase.js`, несмотря на название, — не настоящая интеграция Firebase, это
+  `src/lib/db.js`.)
 - `src/worker.js` / `wrangler.jsonc` — незавершённая заготовка миграции на Cloudflare Worker.
+- `/stats` обнуляется в полночь UTC (счётчик за календарные сутки), а не скользящее окно 24ч —
+  см. `src/lib/stats.js`.

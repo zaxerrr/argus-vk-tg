@@ -29,8 +29,10 @@ const VK_SECRET_KEY      = required('VK_SECRET_KEY');
 const VK_SERVICE_KEY     = required('VK_SERVICE_KEY');
 const TELEGRAM_BOT_TOKEN = required('TELEGRAM_BOT_TOKEN');
 const TELEGRAM_CHAT_ID   = required('TELEGRAM_CHAT_ID');
-const SUPABASE_URL              = required('SUPABASE_URL');
-const SUPABASE_SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
+
+// Содержимое JSON-файла сервисного аккаунта Firebase (Project Settings → Service accounts →
+// Generate new private key), целиком как одна строка — см. src/lib/db.js.
+const FIREBASE_SERVICE_ACCOUNT = required('FIREBASE_SERVICE_ACCOUNT');
 
 const LEAD_CHAT_ID   = process.env.LEAD_CHAT_ID || null;
 const DEBUG_CHAT_ID  = process.env.DEBUG_CHAT_ID || null;
@@ -64,8 +66,7 @@ module.exports = {
   STATS_CHAT_ID,
   ADMIN_USER_IDS,
   BOT_VERSION,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
+  FIREBASE_SERVICE_ACCOUNT,
   VK_CONFIRMATION_CODE,
   TELEGRAM_TOPIC_MAIN_ID,
   TELEGRAM_TOPIC_LEAD_ID,

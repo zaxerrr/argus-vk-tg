@@ -14,8 +14,9 @@ const FULL_ENV = {
   VK_SERVICE_KEY: 'x',
   TELEGRAM_BOT_TOKEN: 'x',
   TELEGRAM_CHAT_ID: '1',
-  SUPABASE_URL: 'http://localhost',
-  SUPABASE_SERVICE_ROLE_KEY: 'x',
+  // config.js только проверяет наличие этой переменной (required()) — парсит JSON уже
+  // src/lib/db.js, которого этот тест не требует, так что валидный JSON здесь не нужен.
+  FIREBASE_SERVICE_ACCOUNT: 'x',
 };
 
 function runWithEnv(env) {

@@ -1,13 +1,14 @@
 
 // src/lib/logger.js (CommonJS)
-// Структурированный логгер, который пишет пакетные записи в Supabase (дружелюбно к бесплатному тарифу)
-const { supabase } = require('./db');
+// Структурированный логгер: пишет пакетные записи в Firestore (bot_logs), пакетами через batch()
+// (дружелюбно к бесплатным квотам Firestore — меньше сетевых round-trip'ов на запись).
+const { db } = require('./db');
 const { randomUUID } = require('crypto');
 
 /** @typedef {'debug'|'info'|'warn'|'error'} Level */
 /** @typedef {'in'|'out'|'none'} Direction */
 
-class SupabaseLogger {
+class FirestoreLogger {
   constructor () {
     this.queue = [];
     this.timer = null;
@@ -38,6 +39,9 @@ class SupabaseLogger {
       }
     }
     this.queue.push(rec);
+    // Счётчики статистики обновляются сразу и независимо от очереди логов —
+    // см. src/lib/stats.js. Ошибка здесь не должна ронять логирование.
+    try { require('./stats').bumpStatsCounters(rec); } catch (_) {}
     if (this.queue.length >= this.BATCH_MAX) {
       // не ждём завершения
       this.flush().catch(() => {});
@@ -50,30 +54,29 @@ class SupabaseLogger {
       this.stopTimer();
       return;
     }
-    const batch = this.queue.splice(0, this.BATCH_MAX);
+    const batchRecs = this.queue.splice(0, this.BATCH_MAX);
     try {
-      const { error } = await supabase
-        .from('bot_logs')
-        .insert(batch.map(r => ({
+      const batch = db.batch();
+      for (const r of batchRecs) {
+        const ref = db.collection('bot_logs').doc();
+        batch.set(ref, {
           ts: r.ts || new Date().toISOString(),
           level: r.level,
-          source: r.source,
-          event: r.event,
+          source: r.source || null,
+          event: r.event || null,
           request_id: r.request_id || randomUUID(),
           chat_id: r.chat_id || null,
           user_id: r.user_id || null,
           direction: r.direction || 'none',
           summary: r.summary || null,
-          payload: r.payload || null,
+          payload: r.payload ?? null,
           error: r.error || null,
-        })));
-      if (error) {
-        console.error('[logger] Ошибка вставки в Supabase:', error.message);
-        for (const rec of batch) console.log('[log-fallback]', JSON.stringify(rec));
+        });
       }
+      await batch.commit();
     } catch (e) {
-      console.error('[logger] Исключение при flush:', e && e.message ? e.message : e);
-      for (const rec of batch) console.log('[log-fallback]', JSON.stringify(rec));
+      console.error('[logger] Ошибка записи в Firestore:', e && e.message ? e.message : e);
+      for (const rec of batchRecs) console.log('[log-fallback]', JSON.stringify(rec));
     }
   }
 
@@ -84,7 +87,7 @@ class SupabaseLogger {
   error (rec) { this.write('error', rec); }
 }
 
-const logger = new SupabaseLogger();
+const logger = new FirestoreLogger();
 
 // Хелперы для Express
 function withRequestId () {
