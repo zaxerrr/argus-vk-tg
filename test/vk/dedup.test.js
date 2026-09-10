@@ -32,3 +32,48 @@ test('shouldProcessEvent is true before rememberEvent and false after', () => {
   rememberEvent(ctx);
   assert.equal(shouldProcessEvent(ctx), false);
 });
+
+test('like_add events on different posts yield different keys (regression)', () => {
+  const likeOnPostA = {
+    type: 'like_add',
+    group_id: 123,
+    object: { liker_id: 111, object_type: 'post', object_id: 456, owner_id: -123 }
+  };
+  const likeOnPostB = {
+    type: 'like_add',
+    group_id: 123,
+    object: { liker_id: 111, object_type: 'post', object_id: 789, owner_id: -123 }
+  };
+
+  assert.notEqual(buildKey(likeOnPostA), buildKey(likeOnPostB));
+});
+
+test('like_add events by different likers on the same post yield different keys', () => {
+  const likeByUser1 = {
+    type: 'like_add',
+    group_id: 123,
+    object: { liker_id: 111, object_type: 'post', object_id: 456, owner_id: -123 }
+  };
+  const likeByUser2 = {
+    type: 'like_add',
+    group_id: 123,
+    object: { liker_id: 222, object_type: 'post', object_id: 456, owner_id: -123 }
+  };
+
+  assert.notEqual(buildKey(likeByUser1), buildKey(likeByUser2));
+});
+
+test('like_add and like_remove on the same post/liker yield different keys (different type)', () => {
+  const like = {
+    type: 'like_add',
+    group_id: 123,
+    object: { liker_id: 111, object_type: 'post', object_id: 456, owner_id: -123 }
+  };
+  const unlike = {
+    type: 'like_remove',
+    group_id: 123,
+    object: { liker_id: 111, object_type: 'post', object_id: 456, owner_id: -123 }
+  };
+
+  assert.notEqual(buildKey(like), buildKey(unlike));
+});

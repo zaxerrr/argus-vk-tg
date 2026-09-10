@@ -5,14 +5,22 @@ const NodeCache = require('node-cache');
 const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
 function buildKey({ type, object, group_id }) {
+  // object_id — реальное поле VK для like_add/like_remove (см. src/vk/events.js, ev.object_id) —
+  // раньше отсутствовало здесь, из-за чего все like_add-события (у них нет и object.date) хэшировались
+  // в один и тот же ключ и все, кроме первого в TTL-окне, молча считались дубликатами.
   const objectId =
     object?.id || object?.comment_id || object?.video_id || object?.photo_id ||
     object?.post_id || object?.message?.id || object?.user_id || object?.item_id ||
-    object?.topic_id || object?.poll_id;
+    object?.topic_id || object?.poll_id || object?.object_id || object?.event_id;
+
+  // Актёр события (кто лайкнул/вступил/etc) — без него два разных пользователя, поставившие лайк
+  // одному и тому же объекту в одну секунду (или вовсе без date), тоже схлопнулись бы в один ключ.
+  const actorId = object?.liker_id || object?.user_id || object?.from_id || object?.admin_id;
 
   const payload = {
     type,
     objectId,
+    actorId,
     groupId: group_id || 'nogrp',
     date: object?.date || null
   };
