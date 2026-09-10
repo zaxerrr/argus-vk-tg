@@ -9,7 +9,7 @@
 // Компромисс: счётчики обнуляются в полночь UTC, а не "24 часа назад от сейчас"; топ типов
 // событий VK — тоже только за сегодня, без истории по дням (SQL-вьюхи это умели, здесь — нет).
 
-const { db, admin } = require('./db');
+const { db, FieldValue } = require('./db');
 
 function todayDocId() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD, UTC
@@ -21,21 +21,21 @@ function bumpStatsCounters(rec) {
   const updates = {};
 
   if (rec.source === 'vk' && rec.event === 'incoming_update') {
-    updates.vk_events = admin.firestore.FieldValue.increment(1);
+    updates.vk_events = FieldValue.increment(1);
     const rawType = rec.payload && rec.payload.type;
     // Тип события VK приходит из внешнего вебхука — используется как сегмент пути поля Firestore,
     // поэтому валидируем строго, иначе кладём в "other" (защита от path injection через payload.type).
     const type = typeof rawType === 'string' && /^[a-z0-9_]+$/.test(rawType) ? rawType : 'other';
-    updates[`vk_event_types.${type}`] = admin.firestore.FieldValue.increment(1);
+    updates[`vk_event_types.${type}`] = FieldValue.increment(1);
   }
   if (rec.source === 'telegram' && rec.event === 'incoming_update') {
-    updates.telegram_updates = admin.firestore.FieldValue.increment(1);
+    updates.telegram_updates = FieldValue.increment(1);
   }
   if (rec.source === 'telegram' && rec.event === 'outgoing_message') {
-    updates.telegram_sent = admin.firestore.FieldValue.increment(1);
+    updates.telegram_sent = FieldValue.increment(1);
   }
   if (rec.level === 'error') {
-    updates.errors = admin.firestore.FieldValue.increment(1);
+    updates.errors = FieldValue.increment(1);
   }
   if (Object.keys(updates).length === 0) return;
 

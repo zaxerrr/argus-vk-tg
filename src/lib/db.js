@@ -1,8 +1,13 @@
 
 // src/lib/db.js (CommonJS)
 // Инициализация Firebase Admin SDK и клиента Firestore.
-const admin = require('firebase-admin');
-const { FIREBASE_SERVICE_ACCOUNT } = require('../config');
+//
+// Модульный API (firebase-admin/app, firebase-admin/firestore) вместо неймспейсного
+// (admin.credential.cert(...) / admin.firestore()) — начиная с firebase-admin@14 неймспейсный
+// admin.credential.cert исчезает, модульный работает на всех актуальных версиях.
+const { cert, initializeApp } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { FIREBASE_SERVICE_ACCOUNT, FIREBASE_FIRESTORE_DATABASE_ID } = require('../config');
 
 let serviceAccount;
 try {
@@ -12,10 +17,11 @@ try {
   process.exit(1);
 }
 
-if (!admin.apps.length) {
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-}
+const app = initializeApp({ credential: cert(serviceAccount) });
 
-const db = admin.firestore();
+// Явный ID базы обязателен: getFirestore(app) без второго аргумента ищет специальную базу
+// "(default)", которой в этом проекте нет — см. комментарий у FIREBASE_FIRESTORE_DATABASE_ID
+// в src/config.js.
+const db = getFirestore(app, FIREBASE_FIRESTORE_DATABASE_ID);
 
-module.exports = { admin, db };
+module.exports = { db, FieldValue };

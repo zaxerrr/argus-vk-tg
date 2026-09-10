@@ -29,7 +29,10 @@ formatted notifications to Telegram via long-polling (`node-telegram-bot-api`). 
 `server.js` boots through `src/config.js`, which calls `process.exit(1)` if any of these are
 missing: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (the full JSON of a Firebase service-account key,
-as one string — see `docs/FIREBASE_SETUP.md`). Optional: `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
+as one string — see `docs/FIREBASE_SETUP.md`). Optional: `FIREBASE_FIRESTORE_DATABASE_ID`
+(defaults to `default` — `src/lib/db.js` always passes a Firestore database ID explicitly rather
+than relying on the `getFirestore(app)` default of the special `(default)` database, which this
+project's database is *not* named — see the warning in `docs/FIREBASE_SETUP.md`), `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
 `STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (forum-topic thread IDs — see
 [Forum topics](#forum-topics-single-supergroup) below), `STATS_DIGEST_HOURS`, `ADMIN_USER_IDS`
 (comma-separated Telegram user IDs), `BOT_VERSION` (falls back to `package.json` version), `PORT`
@@ -190,7 +193,11 @@ Node.js-бот, который принимает события VK Callback API
 `server.js` запускается через `src/config.js`, который вызывает `process.exit(1)`, если
 отсутствует хотя бы одна из переменных: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (весь JSON сервисного
-аккаунта Firebase одной строкой — см. `docs/FIREBASE_SETUP.md`). Необязательные: `LEAD_CHAT_ID`,
+аккаунта Firebase одной строкой — см. `docs/FIREBASE_SETUP.md`). Необязательные:
+`FIREBASE_FIRESTORE_DATABASE_ID` (по умолчанию `default` — `src/lib/db.js` всегда передаёт ID базы
+Firestore явно, а не полагается на дефолт `getFirestore(app)`, который ищет специальную базу
+`(default)` — а база этого проекта называется иначе, см. предупреждение в
+`docs/FIREBASE_SETUP.md`), `LEAD_CHAT_ID`,
 `DEBUG_CHAT_ID`, `STATS_CHAT_ID`, `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` (ID тем форума —
 см. [Темы супергруппы](#темы-forum-topics-единая-супергруппа) ниже), `STATS_DIGEST_HOURS`,
 `ADMIN_USER_IDS` (ID пользователей Telegram через запятую), `BOT_VERSION` (по умолчанию берётся
