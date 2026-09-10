@@ -72,13 +72,19 @@ const webhookRateLimit = createRateLimiter({ windowMs: 60_000, max: 120 });
 
 app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   const { type, object, group_id, secret } = req.body || {};
-  console.log(`[${new Date().toISOString()}] VK событие: ${type}`);
+  // Логируем сам факт запроса ДО проверки секрета — иначе отказ по секрету (опечатка/смена
+  // VK_SECRET_KEY при переключении на другую группу) не оставляет в логах ни следа, и "пустые
+  // логи" неотличимы от "VK вообще не стучится на вебхук".
+  console.log(`[${new Date().toISOString()}] VK запрос: type=${type || '?'} group_id=${group_id || '?'}`);
 
   // Проверка секрета (timing-safe, чтобы не давать утечку через разницу во времени сравнения)
   const provided = Buffer.from(String(secret || ''));
   const expected = Buffer.from(String(VK_SECRET_KEY));
   const secretOk = provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
-  if (!secretOk) return res.status(403).send('Forbidden');
+  if (!secretOk) {
+    console.warn(`[${new Date().toISOString()}] VK secret не совпал — запрос отклонён (403)`);
+    return res.status(403).send('Forbidden');
+  }
 
   // Подтверждение сервера VK: нужно вернуть РОВНО строку из настроек Callback API
   // (не "ok") — иначе VK не активирует Callback API для нового сообщества.
