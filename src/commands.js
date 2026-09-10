@@ -7,6 +7,26 @@ const { DEBUG_CHAT_ID, BOT_VERSION } = require('./config');
 const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./lib/stats');
 
 function registerCommands(bot) {
+  // Регистрация меню команд Telegram (автокомплит по "/") — список дублирует /help.
+  // Fire-and-forget: не должно блокировать остальную регистрацию обработчиков.
+  bot.setMyCommands([
+    { command: 'help', description: 'Список команд' },
+    { command: 'status', description: 'Статус бота' },
+    { command: 'my_chat_id', description: 'ID текущего чата' },
+    { command: 'whoami', description: 'Информация о себе' },
+    { command: 'ping', description: 'Задержка ответа' },
+    { command: 'version', description: 'Версия и аптайм' },
+    { command: 'topic_id', description: 'ID темы (thread) текущего сообщения' },
+    { command: 'topics', description: 'Темы супергруппы по ролям (админ)' },
+    { command: 'set_topic', description: 'Привязать тему к роли (админ)' },
+    { command: 'list_events', description: 'Список типов событий VK (админ)' },
+    { command: 'toggle_event', description: 'Вкл/выкл тип события (админ)' },
+    { command: 'set_main_chat', description: 'Основной чат (админ)' },
+    { command: 'send_main', description: 'Отправить сообщение в основной (админ)' },
+    { command: 'test_notification', description: 'Тестовое уведомление (админ)' },
+    { command: 'stats', description: 'Статистика за сегодня (админ)' }
+  ]).catch(e => console.error('Не удалось зарегистрировать команды бота:', e.message));
+
   bot.onText(/^\/help$/, async (msg) => {
     const text = [
       '👋 Доступные команды:',
@@ -161,9 +181,16 @@ function registerCommands(bot) {
   bot.onText(/^\/stats$/, async (msg) => {
     if (!isAdmin(msg.from?.id)) return;
     try {
-      const [overview, top] = await Promise.all([getOverview24h(), getTopVkEventTypes(10)]);
+      // Таймаут — как у /health (server.js) — иначе недоступный Firestore вешает команду без
+      // видимого ответа вместо явной ошибки.
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore не ответил за 5с')), 5000));
+      const [overview, top] = await Promise.race([
+        Promise.all([getOverview24h(), getTopVkEventTypes(10)]),
+        timeout
+      ]);
       await sendTelegramMessageWithRetry(msg.chat.id, formatDigest(overview, top), { parse_mode: 'HTML' });
     } catch (e) {
+      console.error('[commands] /stats failed:', e.message);
       await sendTelegramMessageWithRetry(msg.chat.id, `❌ Не удалось получить статистику: ${escapeHtml(e.message)}`);
     }
   });
