@@ -63,19 +63,91 @@ async function getTopVkEventTypes(limit = 10) {
     .slice(0, limit);
 }
 
+// Человекочитаемые подписи для типов событий VK в дайджесте — только для отображения, ключ
+// счётчика в Firestore (vk_event_types.<type>) остаётся сырым типом VK. Тип без подписи здесь
+// просто печатается как есть (см. objNounDative/objNounAblative в src/vk/format.js — похожий
+// принцип "явный список + fallback").
+const VK_TYPE_LABELS = {
+  message_new: 'Сообщения',
+  message_reply: 'Ответы на сообщения',
+  message_edit: 'Отредактированные сообщения',
+  message_allow: 'Разрешения на сообщения',
+  message_deny: 'Запреты сообщений',
+  message_typing_state: 'Печатает',
+  message_event: 'Нажатия кнопок',
+  message_reaction_event: 'Реакции на сообщения',
+  wall_post_new: 'Посты на стене',
+  wall_post_edit: 'Отредактированные посты',
+  wall_repost: 'Репосты',
+  wall_reply_new: 'Комментарии к постам',
+  wall_reply_edit: 'Отредактированные комментарии',
+  wall_reply_delete: 'Удалённые комментарии',
+  wall_reply_restore: 'Восстановленные комментарии',
+  photo_new: 'Новые фото',
+  photo_comment_new: 'Комментарии к фото',
+  photo_comment_edit: 'Отредактированные комментарии к фото',
+  photo_comment_delete: 'Удалённые комментарии к фото',
+  photo_comment_restore: 'Восстановленные комментарии к фото',
+  video_new: 'Новые видео',
+  video_comment_new: 'Комментарии к видео',
+  video_comment_edit: 'Отредактированные комментарии к видео',
+  video_comment_delete: 'Удалённые комментарии к видео',
+  video_comment_restore: 'Восстановленные комментарии к видео',
+  audio_new: 'Новое аудио',
+  board_post_new: 'Обсуждения: новые посты',
+  board_post_edit: 'Обсуждения: правки',
+  board_post_delete: 'Обсуждения: удаления',
+  market_order_new: 'Новые заказы',
+  market_order_edit: 'Изменения заказов',
+  market_comment_new: 'Комментарии к товарам',
+  market_comment_edit: 'Отредактированные комментарии к товарам',
+  market_comment_delete: 'Удалённые комментарии к товарам',
+  poll_vote_new: 'Голоса в опросах',
+  group_join: 'Вступления в группу',
+  group_leave: 'Выходы из группы',
+  group_change_photo: 'Смена фото группы',
+  group_change_settings: 'Изменения настроек группы',
+  group_officers_edit: 'Изменения руководства группы',
+  user_block: 'Блокировки пользователей',
+  user_unblock: 'Разблокировки пользователей',
+  like_add: 'Лайки',
+  like_remove: 'Снятые лайки',
+  lead_forms_new: 'Лид-формы',
+  app_payload: 'Сообщения от приложения',
+  vkpay_transaction: 'Платежи VK Pay',
+};
+
+function vkTypeLabel(type) {
+  return VK_TYPE_LABELS[type] || type;
+}
+
+// Показывает только то, что реально произошло — ни одной строки с нулём. Если совсем ничего
+// не было за сутки, так и пишет, вместо колонки нулей ("Событий VK: 0", "Ошибок: 0" и т.д.),
+// бесполезной для быстрого просмотра.
 function formatDigest(overview, topTypes) {
-  const lines = [
-    '📊 <b>Статистика за сегодня</b>',
-    '',
-    `События VK: <b>${overview.vk_events_24h}</b>`,
-    `Обновления Telegram: <b>${overview.telegram_updates_24h}</b>`,
-    `Отправлено сообщений: <b>${overview.telegram_sent_24h}</b>`,
-    `Ошибок: <b>${overview.errors_24h}</b>`
-  ];
-  if (topTypes && topTypes.length) {
-    lines.push('', 'Топ типов событий VK:');
-    topTypes.forEach((t, i) => lines.push(`${i + 1}. ${t.vk_event_type} — ${t.events}`));
+  const lines = ['📊 <b>Статистика за сегодня</b>', ''];
+
+  const summary = [
+    overview.vk_events_24h > 0 && `События VK: <b>${overview.vk_events_24h}</b>`,
+    overview.telegram_updates_24h > 0 && `Обновления Telegram: <b>${overview.telegram_updates_24h}</b>`,
+    overview.telegram_sent_24h > 0 && `Отправлено сообщений: <b>${overview.telegram_sent_24h}</b>`,
+    overview.errors_24h > 0 && `Ошибок: <b>${overview.errors_24h}</b>`,
+  ].filter(Boolean);
+
+  const hasTopTypes = topTypes && topTypes.length > 0;
+
+  if (summary.length === 0 && !hasTopTypes) {
+    lines.push('Событий не было.');
+    return lines.join('\n');
   }
+
+  lines.push(...summary);
+
+  if (hasTopTypes) {
+    lines.push('', 'По типам событий VK:');
+    topTypes.forEach(t => lines.push(`${vkTypeLabel(t.vk_event_type)}: <b>${t.events}</b>`));
+  }
+
   return lines.join('\n');
 }
 
