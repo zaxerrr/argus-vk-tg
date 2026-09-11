@@ -44,7 +44,15 @@ async function tryGetLikesCount(ownerId, objectId, objectType) {
   try {
     const { data } = await axios.get('https://api.vk.com/method/likes.getList', { params, timeout: 3000 });
     if (data && data.response && typeof data.response.count === 'number') return data.response.count;
-  } catch (_) {}
+    // VK API возвращает ошибки в теле ответа (HTTP 200 + {"error": {...}}), а не HTTP-кодом —
+    // axios здесь ничего не бросает, поэтому без явного лога такой сбой был неотличим от "просто
+    // нет данных" и счётчик молча пропадал из сообщения.
+    if (data && data.error) {
+      console.warn(`[likes] likes.getList вернул ошибку VK API (code ${data.error.error_code}): ${data.error.error_msg}`);
+    }
+  } catch (e) {
+    console.warn('[likes] likes.getList: запрос не выполнен:', e.message);
+  }
   return null;
 }
 
