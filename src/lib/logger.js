@@ -40,8 +40,10 @@ class FirestoreLogger {
     }
     this.queue.push(rec);
     // Счётчики статистики обновляются сразу и независимо от очереди логов —
-    // см. src/lib/stats.js. Ошибка здесь не должна ронять логирование.
-    try { require('./stats').bumpStatsCounters(rec); } catch (_) {}
+    // см. src/lib/stats.js. Ошибка здесь не должна ронять логирование, но раньше эта ошибка
+    // проглатывалась молча (пустой catch) — если бы require('./stats') или сам вызов бросали
+    // исключение синхронно, /stats показывал бы одни нули без единого следа в логах Render.
+    try { require('./stats').bumpStatsCounters(rec); } catch (e) { console.error('[logger] bumpStatsCounters упал:', e.message); }
     if (this.queue.length >= this.BATCH_MAX) {
       // не ждём завершения
       this.flush().catch(() => {});
