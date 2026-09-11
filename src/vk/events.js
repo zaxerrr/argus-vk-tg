@@ -104,6 +104,12 @@ async function handleVkEvent({ type, object }) {
       msg = `🖲️ ${u} нажал(а) кнопку`;
       break;
     }
+    case 'message_reaction_event': {
+      const ev = object;
+      const u = await userLink(ev.reactor_id);
+      msg = `😀 ${u} отреагировал(а) на сообщение`;
+      break;
+    }
 
     /* ---------- Лайки (лаконично + СЧЁТЧИК) ---------- */
     case 'like_add': {

@@ -4,6 +4,11 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { TELEGRAM_BOT_TOKEN, LEAD_CHAT_ID, DEBUG_CHAT_ID, STATS_CHAT_ID } = require('./config');
 const { state } = require('./state');
+// Ленивый require — logger.js тянет src/lib/db.js (Firebase Admin SDK), а telegram.js
+// используется и в местах, где это нежелательно на этапе require (см. CLAUDE.md, тестирование).
+function logOutgoing (chatId, text) {
+  try { require('./lib/logger').logOutgoingMessage('telegram', String(chatId), text); } catch (_) {}
+}
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
@@ -31,6 +36,7 @@ async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
   for (let i = 0; i < 3; i++) {
     try {
       await bot.sendMessage(chatId, text, { ...options, disable_web_page_preview: true });
+      logOutgoing(chatId, text);
       return;
     } catch (err) {
       const msg = `Ошибка sendMessage (${i + 1}/3) в чат ${chatId}: ${err.message}`;

@@ -62,6 +62,7 @@ Callback API**) VK присылает `POST` с `{"type": "confirmation", "group
 | `message_typing_state` | ✅ (по умолчанию выкл — шум) | ✅ |
 | `message_read` | ✅ (по умолчанию выкл — шум) | быстрый ack в `server.js`, не доходит до `handleVkEvent` |
 | `message_event` | ✅ | ✅ |
+| `message_reaction_event` | ✅ | ✅ |
 | `wall_post_new` | ✅ | ✅ |
 | `wall_post_edit` | ✅ | ✅ |
 | `wall_repost` | ✅ | ✅ |
@@ -100,3 +101,10 @@ Callback API**) VK присылает `POST` с `{"type": "confirmation", "group
 `src/vk/events.js` и ключ в `src/state.js` по инструкции в `CLAUDE.md`
 («Adding a new VK event type» / «Добавление нового типа события VK»), затем допишите
 строку в эту таблицу.
+
+`message_reaction_event` (реакция на сообщение сообщества) добавлен 2026-09-11 по репорту
+пользователя (`❓ message_reaction_event` в чате — сработал дефолтный кейс). Схема
+`object` (`reactor_id`, `message_id`, `peer_id`, `reaction_id`) взята по памяти модели, а не
+проверена live-фетчем `dev.vk.ru` (см. оговорку выше) — если при реальном событии текст/поля
+разойдутся с ожиданиями, поправьте `case 'message_reaction_event'` в `src/vk/events.js` под
+фактический payload (его можно достать командой `/raw_event message_reaction_event` в боте).

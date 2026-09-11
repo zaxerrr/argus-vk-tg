@@ -77,3 +77,33 @@ test('like_add and like_remove on the same post/liker yield different keys (diff
 
   assert.notEqual(buildKey(like), buildKey(unlike));
 });
+
+test('message_reaction_event on different messages yield different keys (regression)', () => {
+  const reactionOnMsgA = {
+    type: 'message_reaction_event',
+    group_id: 123,
+    object: { reactor_id: 111, message_id: 555, peer_id: 999, reaction_id: 1 }
+  };
+  const reactionOnMsgB = {
+    type: 'message_reaction_event',
+    group_id: 123,
+    object: { reactor_id: 111, message_id: 556, peer_id: 999, reaction_id: 1 }
+  };
+
+  assert.notEqual(buildKey(reactionOnMsgA), buildKey(reactionOnMsgB));
+});
+
+test('message_reaction_event by different reactors on the same message yield different keys', () => {
+  const reactionByUser1 = {
+    type: 'message_reaction_event',
+    group_id: 123,
+    object: { reactor_id: 111, message_id: 555, peer_id: 999, reaction_id: 1 }
+  };
+  const reactionByUser2 = {
+    type: 'message_reaction_event',
+    group_id: 123,
+    object: { reactor_id: 222, message_id: 555, peer_id: 999, reaction_id: 1 }
+  };
+
+  assert.notEqual(buildKey(reactionByUser1), buildKey(reactionByUser2));
+});

@@ -11,11 +11,14 @@ function buildKey({ type, object, group_id }) {
   const objectId =
     object?.id || object?.comment_id || object?.video_id || object?.photo_id ||
     object?.post_id || object?.message?.id || object?.user_id || object?.item_id ||
-    object?.topic_id || object?.poll_id || object?.object_id || object?.event_id;
+    object?.topic_id || object?.poll_id || object?.object_id || object?.event_id ||
+    object?.message_id;
 
-  // Актёр события (кто лайкнул/вступил/etc) — без него два разных пользователя, поставившие лайк
-  // одному и тому же объекту в одну секунду (или вовсе без date), тоже схлопнулись бы в один ключ.
-  const actorId = object?.liker_id || object?.user_id || object?.from_id || object?.admin_id;
+  // Актёр события (кто лайкнул/вступил/поставил реакцию/etc) — без него два разных пользователя,
+  // сделавших это с одним и тем же объектом в одну секунду (или вовсе без date), тоже схлопнулись
+  // бы в один ключ.
+  const actorId = object?.liker_id || object?.user_id || object?.from_id || object?.admin_id ||
+    object?.reactor_id;
 
   const payload = {
     type,

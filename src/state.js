@@ -32,6 +32,7 @@ const state = {
     message_typing_state: false,   // шум ("печатает…"); было "typing_status" — несуществующий тип VK, событие никогда не подавлялось
     message_read: false,           // шум
     message_event: true,           // нажатие callback-кнопки
+    message_reaction_event: true,  // реакция (эмодзи) на сообщение сообщества
 
     // Стена
     wall_post_new: true,

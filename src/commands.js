@@ -3,8 +3,13 @@
 const { sendTelegramMessageWithRetry, resolveRoleTarget } = require('./telegram');
 const { state, isAdmin, setMainChat, toggleEvent, setTopic, TOPIC_ROLES } = require('./state');
 const { escapeHtml } = require('./utils');
-const { DEBUG_CHAT_ID, BOT_VERSION } = require('./config');
+const { DEBUG_CHAT_ID, LEAD_CHAT_ID, STATS_CHAT_ID, BOT_VERSION } = require('./config');
 const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./lib/stats');
+const { db } = require('./lib/db');
+
+// Та же карта, что в src/telegram.js — используется только для предупреждения в /set_topic
+// (см. ниже), не для маршрутизации.
+const ROLE_CHAT_ENV = { lead: LEAD_CHAT_ID, debug: DEBUG_CHAT_ID, stats: STATS_CHAT_ID };
 
 function registerCommands(bot) {
   // Регистрация меню команд Telegram (автокомплит по "/") — список дублирует /help.
@@ -24,7 +29,8 @@ function registerCommands(bot) {
     { command: 'set_main_chat', description: 'Основной чат (админ)' },
     { command: 'send_main', description: 'Отправить сообщение в основной (админ)' },
     { command: 'test_notification', description: 'Тестовое уведомление (админ)' },
-    { command: 'stats', description: 'Статистика за сегодня (админ)' }
+    { command: 'stats', description: 'Статистика за сегодня (админ)' },
+    { command: 'raw_event', description: 'Сырой JSON последнего VK-события (админ)' }
   ]).catch(e => console.error('Не удалось зарегистрировать команды бота:', e.message));
 
   bot.onText(/^\/help$/, async (msg) => {
@@ -44,7 +50,8 @@ function registerCommands(bot) {
       '/topic_id — ID темы (thread) текущего сообщения',
       '/topics — темы супергруппы по ролям (админ)',
       '/set_topic <роль> <id|here|off> — привязать тему к роли (админ)',
-      '/stats — статистика за 24ч (админ)'
+      '/stats — статистика за сегодня (UTC) (админ)',
+      '/raw_event [тип] — сырой JSON последнего VK-события из логов (админ)'
     ].join('\n');
     await sendTelegramMessageWithRetry(msg.chat.id, text);
   });
@@ -174,7 +181,16 @@ function registerCommands(bot) {
       return;
     }
     const desc = result === null ? 'сброшена (без темы)' : `установлена: <code>${result}</code>`;
-    sendTelegramMessageWithRetry(msg.chat.id, `${role}: тема ${desc}`, { parse_mode: 'HTML' });
+
+    // Тема привязана к конкретному чату — если у роли задан отдельный *_CHAT_ID, отличный от
+    // чата, где выполнена эта команда, тема, установленная "here", относится не к тому чату:
+    // отправка в эту роль будет молча падать ("message thread not found"). См. журнал решений.
+    let warning = '';
+    const dedicatedChat = ROLE_CHAT_ENV[role];
+    if (result !== null && dedicatedChat && String(dedicatedChat) !== String(msg.chat.id)) {
+      warning = `\n⚠️ У роли "${role}" задан отдельный чат (<code>${dedicatedChat}</code>), а команда выполнена в чате <code>${msg.chat.id}</code>. Тема применится только к сообщениям в чат <code>${dedicatedChat}</code> — если этот ID темы не из него, отправка будет молча падать. Выполни команду внутри нужной темы именно того чата.`;
+    }
+    sendTelegramMessageWithRetry(msg.chat.id, `${role}: тема ${desc}${warning}`, { parse_mode: 'HTML' });
   });
 
   // ==== Статистика ====
@@ -195,10 +211,40 @@ function registerCommands(bot) {
     }
   });
 
+  // ==== Диагностика: сырой payload последнего события из bot_logs (Firestore) ====
+  bot.onText(/^\/raw_event(?:\s+(\S+))?$/, async (msg, m) => {
+    if (!isAdmin(msg.from?.id)) return;
+    const wantedType = m[1];
+    try {
+      // Без фильтра by "==" на payload.type — такой запрос потребовал бы создания составного
+      // индекса в Firestore (equality + orderBy на разных полях). Вместо этого читаем последние
+      // N записей одним запросом (одно поле сортировки — не требует индекса) и фильтруем в коде.
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore не ответил за 5с')), 5000));
+      const snap = await Promise.race([
+        db.collection('bot_logs').where('source', '==', 'vk').orderBy('ts', 'desc').limit(30).get(),
+        timeout
+      ]);
+      const doc = snap.docs
+        .map(d => d.data())
+        .find(r => !wantedType || (r.payload && r.payload.type === wantedType));
+      if (!doc) {
+        const hint = wantedType ? ` типа <code>${escapeHtml(wantedType)}</code>` : '';
+        await sendTelegramMessageWithRetry(msg.chat.id, `Событие${hint} не найдено среди последних 30 VK-записей в bot_logs.`, { parse_mode: 'HTML' });
+        return;
+      }
+      const json = JSON.stringify(doc.payload, null, 2);
+      const text = `<b>${escapeHtml(doc.payload?.type || '?')}</b> (${escapeHtml(doc.ts || '')})\n<pre>${escapeHtml(json.slice(0, 3500))}</pre>`;
+      await sendTelegramMessageWithRetry(msg.chat.id, text, { parse_mode: 'HTML' });
+    } catch (e) {
+      console.error('[commands] /raw_event failed:', e.message);
+      await sendTelegramMessageWithRetry(msg.chat.id, `❌ Не удалось прочитать bot_logs: ${escapeHtml(e.message)}`);
+    }
+  });
+
   // неизвестные команды
   bot.on('message', async (msg) => {
     if (!msg.text) return;
-    if (/^\//.test(msg.text) && !/^\/(help|status|my_chat_id|whoami|ping|version|test_notification|list_events|toggle_event|set_main_chat|send_main|topic_id|topics|set_topic|stats)\b/.test(msg.text)) {
+    if (/^\//.test(msg.text) && !/^\/(help|status|my_chat_id|whoami|ping|version|test_notification|list_events|toggle_event|set_main_chat|send_main|topic_id|topics|set_topic|stats|raw_event)\b/.test(msg.text)) {
       await sendTelegramMessageWithRetry(msg.chat.id, 'Команда не найдена. Напиши /help');
     }
   });
