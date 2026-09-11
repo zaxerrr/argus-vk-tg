@@ -216,17 +216,18 @@ function registerCommands(bot) {
     if (!isAdmin(msg.from?.id)) return;
     const wantedType = m[1];
     try {
-      // Без фильтра by "==" на payload.type — такой запрос потребовал бы создания составного
-      // индекса в Firestore (equality + orderBy на разных полях). Вместо этого читаем последние
-      // N записей одним запросом (одно поле сортировки — не требует индекса) и фильтруем в коде.
+      // Без where(...) — сочетание where("source","==") + orderBy("ts") на РАЗНЫХ полях требует
+      // заранее созданного составного индекса в Firestore, иначе запрос падает с FAILED_PRECONDITION.
+      // Вместо этого читаем последние N записей одним запросом (сортировка по одному полю —
+      // единственная, для неё Firestore держит автоматический индекс) и фильтруем в коде.
       const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore не ответил за 5с')), 5000));
       const snap = await Promise.race([
-        db.collection('bot_logs').where('source', '==', 'vk').orderBy('ts', 'desc').limit(30).get(),
+        db.collection('bot_logs').orderBy('ts', 'desc').limit(50).get(),
         timeout
       ]);
       const doc = snap.docs
         .map(d => d.data())
-        .find(r => !wantedType || (r.payload && r.payload.type === wantedType));
+        .find(r => r.source === 'vk' && (!wantedType || (r.payload && r.payload.type === wantedType)));
       if (!doc) {
         const hint = wantedType ? ` типа <code>${escapeHtml(wantedType)}</code>` : '';
         await sendTelegramMessageWithRetry(msg.chat.id, `Событие${hint} не найдено среди последних 30 VK-записей в bot_logs.`, { parse_mode: 'HTML' });
