@@ -26,7 +26,12 @@ function bumpStatsCounters(rec) {
     // Тип события VK приходит из внешнего вебхука — используется как сегмент пути поля Firestore,
     // поэтому валидируем строго, иначе кладём в "other" (защита от path injection через payload.type).
     const type = typeof rawType === 'string' && /^[a-z0-9_]+$/.test(rawType) ? rawType : 'other';
-    updates[`vk_event_types.${type}`] = FieldValue.increment(1);
+    // ВАЖНО: вложенный объект, а не строковый ключ "vk_event_types.<type>" — set(..., {merge:true})
+    // не разбивает точки в строковых ключах на путь (это делает только update()); строковый ключ
+    // с точкой создавал бы отдельное ЛИТЕРАЛЬНОЕ поле с точкой в имени, а не вложенную карту
+    // vk_event_types. Из-за этого getTopVkEventTypes() всегда читал пустую карту, хотя vk_events
+    // (общий счётчик, отдельное плоское поле) исправно рос.
+    updates.vk_event_types = { [type]: FieldValue.increment(1) };
   }
   if (rec.source === 'telegram' && rec.event === 'incoming_update') {
     updates.telegram_updates = FieldValue.increment(1);
