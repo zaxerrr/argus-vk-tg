@@ -42,7 +42,10 @@ async function tryGetLikesCount(ownerId, objectId, objectType) {
     count: 0
   };
   try {
-    const { data } = await axios.get('https://api.vk.com/method/likes.getList', { params, timeout: 3000 });
+    // 3с (значение в исходном решении) регулярно не хватало на Render free tier сразу после
+    // "пробуждения" из сна — первый исходящий запрос с холодного контейнера может быть заметно
+    // медленнее обычного. Таймаут увеличен; сбой теперь дополнительно виден в логе (см. ниже).
+    const { data } = await axios.get('https://api.vk.com/method/likes.getList', { params, timeout: 8000 });
     if (data && data.response && typeof data.response.count === 'number') return data.response.count;
     // VK API возвращает ошибки в теле ответа (HTTP 200 + {"error": {...}}), а не HTTP-кодом —
     // axios здесь ничего не бросает, поэтому без явного лога такой сбой был неотличим от "просто
