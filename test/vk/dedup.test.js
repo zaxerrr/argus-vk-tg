@@ -18,7 +18,7 @@ test('same input yields same key', () => {
   assert.equal(key1, key2);
 });
 
-test('shouldProcessEvent is true before rememberEvent and false after', () => {
+test('shouldProcessEvent is true before rememberEvent and false after (in-memory only, no db)', async () => {
   const ctx = {
     type: 'photo_new',
     group_id: 321,
@@ -28,9 +28,68 @@ test('shouldProcessEvent is true before rememberEvent and false after', () => {
     }
   };
 
-  assert.equal(shouldProcessEvent(ctx), true);
+  assert.equal(await shouldProcessEvent(ctx), true);
   rememberEvent(ctx);
-  assert.equal(shouldProcessEvent(ctx), false);
+  assert.equal(await shouldProcessEvent(ctx), false);
+});
+
+// Лёгкий фейк Firestore-клиента — без реального firebase-admin, только collection().doc().get()/.set()
+// на in-memory Map. Имитирует "рестарт процесса" сценарием: рассматриваемый ключ уже персистентен
+// в Firestore, но in-memory NodeCache пуст (новый процесс = новый экземпляр кэша).
+function createFakeDb(seed = new Map()) {
+  const store = seed;
+  return {
+    store,
+    collection: () => ({
+      doc: (id) => ({
+        get: async () => ({ exists: store.has(id) }),
+        set: async (data) => { store.set(id, data); }
+      })
+    })
+  };
+}
+
+test('rememberEvent persists the key to the given db', async () => {
+  const ctx = {
+    type: 'like_add',
+    group_id: 198160981,
+    object: { liker_id: 111, object_type: 'post', object_id: 1513, owner_id: -198160981 }
+  };
+  const db = createFakeDb();
+
+  rememberEvent(ctx, db);
+  // Дать fire-and-forget записи в фейковую "Firestore" завершиться.
+  await new Promise(r => setImmediate(r));
+  assert.equal(db.store.has(buildKey(ctx)), true);
+});
+
+test('shouldProcessEvent catches a duplicate via Firestore even when the in-memory cache is empty (simulated restart)', async () => {
+  // Ключ, который ЕЩЁ НИ РАЗУ не передавался в rememberEvent в этом тестовом процессе — значит
+  // его точно нет в module-level in-memory cache, только в "персистентном" фейковом хранилище.
+  // Так проверяется именно резервный (Firestore) уровень, а не in-memory.
+  const ctx = {
+    type: 'like_add',
+    group_id: 198160981,
+    object: { liker_id: 222, object_type: 'post', object_id: 1101, owner_id: -198160981 }
+  };
+  const key = buildKey(ctx);
+  const dbAfterRestart = createFakeDb(new Map([[key, { ts: 'x' }]]));
+
+  assert.equal(await shouldProcessEvent(ctx, dbAfterRestart), false);
+});
+
+test('shouldProcessEvent falls back to "allow" (true) if the Firestore check throws', async () => {
+  const ctx = {
+    type: 'wall_repost',
+    group_id: 1,
+    object: { id: 42 }
+  };
+  const brokenDb = {
+    collection: () => ({
+      doc: () => ({ get: async () => { throw new Error('Firestore unavailable'); } })
+    })
+  };
+  assert.equal(await shouldProcessEvent(ctx, brokenDb), true);
 });
 
 test('like_add events on different posts yield different keys (regression)', () => {

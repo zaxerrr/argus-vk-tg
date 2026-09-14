@@ -104,12 +104,13 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   res.send('ok');
 
   try {
-    // Дедуп
-    if (!shouldProcessEvent({ type, object, group_id })) {
+    // Дедуп — сначала дешёвая проверка в памяти, затем (если её недостаточно) в Firestore,
+    // переживающем рестарт процесса. См. комментарий в src/vk/dedup.js.
+    if (!(await shouldProcessEvent({ type, object, group_id }, db))) {
       console.log('Дубликат — пропуск.');
       return;
     }
-    rememberEvent({ type, object, group_id });
+    rememberEvent({ type, object, group_id }, db);
 
     // Обработка события
     await handleVkEvent({ type, object });

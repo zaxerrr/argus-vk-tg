@@ -43,16 +43,27 @@ are created on first write (`docs/FIREBASE_SETUP.md` lists what gets created and
 ### Request flow (the live code path)
 
 ```
-VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache, 10 min TTL, md5 hash of {type, objectId, actorId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) resolves the target chat + optional forum-topic message_thread_id (see below) → sendTelegramMessageWithRetry (3 retries, 1s/2s/3s backoff, failures echoed to the "debug" role and logged via src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache first, 10 min TTL, md5 hash of {type, objectId, actorId, groupId, date}; falls through to a Firestore `dedup_seen` lookup — see below) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) resolves the target chat + optional forum-topic message_thread_id (see below) → sendTelegramMessageWithRetry (3 retries, 1s/2s/3s backoff, failures echoed to the "debug" role and logged via src/lib/logger.js)
 ```
 
 Telegram → bot commands are registered in `src/commands.js` via `bot.onText`, using the same
 long-polling `bot` instance from `src/telegram.js`. Admin-only commands check
 `isAdmin()` (`src/state.js`) against `ADMIN_USER_IDS`.
 
-The dedup cache is still in-process memory only (resets on restart — acceptable, since duplicates
-are only a risk within VK's short retry window). `eventToggleState`, `CURRENT_MAIN_CHAT_ID`, and
-`topics`, however, are persisted to the Firestore document `bot_state/main` via
+The dedup cache has two tiers: an in-process `NodeCache` (fast, no network round-trip, but reset
+on every restart) checked first, and — only on a cache miss — a Firestore lookup/write against the
+`dedup_seen` collection (doc ID = the same md5 key), which survives restarts. This two-tier design
+exists because relying on in-memory-only dedup turned out not to be safe in practice on Render's
+free tier: the service restarts far more often than "rarely" (sleep-after-15-min-inactivity,
+redeploys), and if VK retries a delivery (having not received "ok" in time) after one of those
+restarts, an in-memory-only cache has already forgotten the event — producing duplicate
+notifications. `shouldProcessEvent(ctx, db)`/`rememberEvent(ctx, db)` take the Firestore client as
+an explicit parameter (not a top-level `require('../lib/db')`) specifically so `src/vk/dedup.js`
+keeps zero side-effecting imports and stays testable in isolation (see Testing conventions below);
+omitting `db` (as the unit tests do) falls back to in-memory-only behavior. A failed/unreachable
+Firestore check fails open (treats the event as new) rather than blocking real events.
+`eventToggleState`, `CURRENT_MAIN_CHAT_ID`, and `topics`, however, are persisted to the Firestore
+document `bot_state/main` via
 `src/lib/stateStore.js`: loaded once on boot (`loadPersistedState()`, awaited before `app.listen`)
 and saved on every `toggleEvent()`/`setMainChat()`/`setTopic()` call. If Firestore is unreachable,
 load/save fail silently (logged, not thrown) and the in-memory defaults from `src/state.js` are
@@ -209,15 +220,25 @@ Render — имеют приоритет). См. `.env.example` для гото�
 ### Поток обработки запроса (реальный рабочий путь кода)
 
 ```
-VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, actorId, groupId, date}) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) определяет целевой чат + опциональный message_thread_id темы форума (см. ниже) → sendTelegramMessageWithRetry (3 попытки, задержки 1с/2с/3с, ошибки дублируются в роль "debug" и логируются через src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (сначала кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, actorId, groupId, date}; при промахе — резервная проверка в Firestore, коллекция `dedup_seen`, см. ниже) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) определяет целевой чат + опциональный message_thread_id темы форума (см. ниже) → sendTelegramMessageWithRetry (3 попытки, задержки 1с/2с/3с, ошибки дублируются в роль "debug" и логируются через src/lib/logger.js)
 ```
 
 Команды Telegram → бот регистрируются в `src/commands.js` через `bot.onText`, используя тот же
 экземпляр `bot` (long-polling) из `src/telegram.js`. Команды только для администратора проверяют
 `isAdmin()` (`src/state.js`) по списку `ADMIN_USER_IDS`.
 
-Кэш дедупликации по-прежнему живёт только в памяти процесса и сбрасывается при рестарте (это
-приемлемо — дубликаты возможны только в коротком окне повторов VK). А вот `eventToggleState`,
+Дедуп двухуровневый: сначала быстрый in-memory `NodeCache` (без похода в сеть, но сбрасывается при
+каждом рестарте), и только при промахе — проверка/запись в Firestore-коллекцию `dedup_seen`
+(document ID = тот же md5-ключ), переживающую рестарт. Второй уровень понадобился, потому что
+предположение «in-memory кэша достаточно, дубликаты возможны только в коротком окне повторов VK» на
+практике не выдержало: бесплатный тариф Render перезапускает процесс заметно чаще, чем «редко» (сон
+после 15 мин простоя, редеплой) — и если VK повторно доставляет событие (не получив вовремя "ok")
+уже после такого рестарта, in-memory-кэш о нём ничего не знает, и уведомление задваивается.
+`shouldProcessEvent(ctx, db)`/`rememberEvent(ctx, db)` принимают Firestore-клиент явным параметром
+(а не через `require('../lib/db')` на верхнем уровне модуля) специально для того, чтобы
+`src/vk/dedup.js` оставался без побочных эффектов при импорте и тестировался изолированно (см.
+«Соглашения по тестированию» ниже); без `db` (как в юнит-тестах) работает только in-memory уровень.
+Недоступность/ошибка Firestore не блокирует обработку реальных событий (fail-open). А вот `eventToggleState`,
 `CURRENT_MAIN_CHAT_ID` и `topics` теперь персистентны — хранятся в документе Firestore
 `bot_state/main` через `src/lib/stateStore.js`: загружаются один раз при старте
 (`loadPersistedState()`, ожидается перед `app.listen`) и сохраняются при каждом вызове
