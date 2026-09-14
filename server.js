@@ -20,6 +20,7 @@ const { handleVkEvent } = require('./src/vk/events');
 const { loadPersistedState } = require('./src/state');
 const { createRateLimiter } = require('./src/security/rateLimit');
 const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./src/lib/stats');
+const { checkVkServiceKey } = require('./src/utils');
 
 // Логгер Firestore
 const { withRequestId, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
@@ -154,6 +155,17 @@ let server;
       `Время (МСК): ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`,
       `Основной чат: <a href="${mainChatUrl}">${mainChatUrl}</a>`
     ];
+
+    // Проверка VK_SERVICE_KEY при старте — без этого невалидный/просроченный ключ был виден
+    // только косвенно, через молча пропадающие счётчики лайков (см. src/utils.js).
+    const vkKeyCheck = await checkVkServiceKey(VK_GROUP_ID).catch(e => ({ ok: false, error: e.message }));
+    if (vkKeyCheck.ok) {
+      lines.push('VK_SERVICE_KEY: ✅ OK');
+    } else {
+      lines.push(`VK_SERVICE_KEY: ❌ ${vkKeyCheck.error}`);
+      console.warn('[boot] VK_SERVICE_KEY не прошёл проверку:', vkKeyCheck.error);
+    }
+
     await sendToRole('debug', lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
   });
 })();
