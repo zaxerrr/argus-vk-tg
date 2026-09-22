@@ -13,86 +13,104 @@ structured logging and runtime-configurable event filtering.
 
 ### What it does
 
-- Receives VK Callback API events on `POST /webhook`.
-- Deduplicates retried events (VK retries if it doesn't get a fast `ok`).
-- Formats a short HTML notification per event type (new posts, comments, likes with live
-  counters, group joins/leaves, market orders, etc.) and sends it to a Telegram chat via
+- Receives VK Callback API events on `POST /webhook` (secret-checked, rate-limited).
+- Deduplicates repeated deliveries — VK often sends the same event 2-5 times within seconds. Two
+  tiers: an in-memory cache, then a Firestore `dedup_seen` collection that survives restarts.
+- Formats a short HTML notification per event type (posts, comments, likes with live counters,
+  message reactions, group joins/leaves, market orders, etc.) and sends it to Telegram via
   long-polling.
-- Exposes Telegram bot commands (`/status`, `/toggle_event`, `/set_main_chat`, `/set_topic`,
-  `/stats`, ...) to inspect and control the bot at runtime; admin-only commands are gated by
-  Telegram user ID.
-- Routes notifications by role (main/lead/debug/stats) to either separate chats or — if you use a
-  single Telegram supergroup with Forum Topics enabled — distinct topics within it.
-- Logs structured request/response records to Firestore for observability, with a real-time stats
-  digest (on demand via `/stats`, or automatically if `STATS_DIGEST_HOURS` is set).
+- Telegram bot commands (`/status`, `/toggle_event`, `/set_topic`, `/stats`, `/raw_event`, ...)
+  to inspect and control the bot at runtime; admin-only commands are gated by Telegram user ID.
+  Commands appear in Telegram's `/` menu and reply in the forum topic they were sent from.
+- Routes notifications by role (main/lead/debug/stats) to separate chats or to topics of one
+  Telegram supergroup with Forum Topics enabled.
+- Logs incoming and outgoing traffic to Firestore; `/stats` shows today's activity per event type.
 
-See [`CLAUDE.md`](./CLAUDE.md) for a deeper description of the request flow and code layout,
-[`docs/VK_API.md`](./docs/VK_API.md) for the current VK API version, Callback API confirmation
-mechanism, and the full event-type ↔ toggle ↔ handler mapping, and
-[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) for setting up the Firebase project.
+More detail: [`CLAUDE.md`](./CLAUDE.md) (request flow, code layout),
+[`docs/VK_API.md`](./docs/VK_API.md) (API version, confirmation, access tokens, event map),
+[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) (Firebase project setup).
 
 ### Setup
 
 1. `npm install`
-2. Copy `.env.example` to `.env` and fill in the values (see comments in the file for where each
-   one comes from). All variables under "Обязательные / Required" are mandatory — the process
-   exits with code 1 on boot if any is missing (`src/config.js`).
-3. Set up Firebase (free Spark plan is enough) — full walkthrough in
-   [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md): create a project, enable Firestore
-   (Native mode), generate a service-account key, and put its JSON content into
-   `FIREBASE_SERVICE_ACCOUNT`. No migrations to run — collections/documents are created on first
-   write.
-4. In your VK community settings, point the Callback API at `https://<your-host>/webhook` and set
-   the same secret as `VK_SECRET_KEY`.
-5. `npm start`
+2. Copy `.env.example` to `.env` and fill it in (comments explain each value). Everything under
+   "Обязательные / Required" is mandatory — the process exits with code 1 on boot if any is
+   missing (`src/config.js`).
+3. Firebase (free Spark plan is enough) — see [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md):
+   create a project, enable Firestore (Native mode), put the service-account key JSON into
+   `FIREBASE_SERVICE_ACCOUNT`, and check `FIREBASE_FIRESTORE_DATABASE_ID`. No migrations.
+4. **`VK_SERVICE_KEY` must be a VK *user* access token (`vk1.a...`), not a community access key.**
+   VK blocks the `likes.*` methods for community keys, so like counters silently won't work with
+   one. How to obtain a user token: [`docs/VK_API.md`](./docs/VK_API.md).
+5. VK community → Manage → API usage → Callback API: server URL `https://<your-host>/webhook`, the
+   secret key = `VK_SECRET_KEY` (a string you make up), copy the confirmation string into
+   `VK_CONFIRMATION_CODE`, and **tick the event types** you want on the "Event types" tab —
+   confirmation alone doesn't subscribe to anything.
+6. `npm start`. The startup message (debug role) reports `VK_SERVICE_KEY: ✅ OK` or the VK error.
 
 ### Deploying
 
-[`render.yaml`](./render.yaml) is a ready-to-use [Render](https://render.com) Blueprint (free
-tier) — Render dashboard → New → Blueprint → pick this repo/fork, then fill in the env vars it
-prompts for. Note the free plan's web services sleep after ~15 minutes with no inbound HTTP
-traffic, which also pauses the bot's Telegram long-polling loop (the whole container stops) — see
-the comment at the top of `render.yaml` for the trade-off and a keep-alive workaround. Any other
-Node.js host works too, as long as it runs `npm start` and forwards its own `PORT`.
+[`render.yaml`](./render.yaml) is a [Render](https://render.com) Blueprint (free tier): Render
+dashboard → New → Blueprint → pick this repo, then fill in the prompted env vars. The free plan
+sleeps after ~15 minutes without inbound HTTP traffic, which also stops the Telegram long-polling
+loop — see the comment in `render.yaml` for the trade-off and a keep-alive workaround. Any Node.js
+18+ host works, as long as it runs `npm start` and passes its own `PORT`.
 
-### Forum topics & stats (optional)
+### Telegram commands
 
-Notifications route by role (`main`/`lead`/`debug`/`stats`) rather than a hardcoded chat. By
-default each role uses its own chat env var (`TELEGRAM_CHAT_ID`/`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/
-`STATS_CHAT_ID`) — same as before. To use a single Telegram supergroup with Forum Topics enabled
-instead: create a topic for each role you want, run `/topic_id` inside it to get its thread ID,
-then either set `TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` in `.env` or run
-`/set_topic <role> here` from inside the topic (admin-only). `/topics` shows the resolved
-chat+topic per role. A role with neither a dedicated chat nor a topic is simply disabled, so this
-is fully opt-in. See `CLAUDE.md` for the resolution order.
+| Command | Access | What it does |
+|---|---|---|
+| `/help` | all | List commands |
+| `/status`, `/ping`, `/version` | all | Liveness, latency, version + uptime |
+| `/my_chat_id`, `/whoami`, `/topic_id` | all | Chat ID, your user ID/admin flag, current topic's thread ID |
+| `/topics` | admin | Resolved chat + topic per role |
+| `/set_topic <role> <id\|here\|off>` | admin | Bind a forum topic to a role (`here` = the topic you're in) |
+| `/list_events`, `/toggle_event <type>` | admin | Show / switch VK event types on and off |
+| `/set_main_chat <id>`, `/send_main <text>` | admin | Change main chat / post into it |
+| `/test_notification` | admin | Test message to the debug chat |
+| `/stats` | admin | Today's (UTC) activity by event type |
+| `/raw_event [type]` | admin | Raw JSON of the latest VK event from `bot_logs` (for unknown types) |
 
-`/stats` (admin) posts a digest (VK events, Telegram traffic, errors, top VK event types) for
-**today (UTC calendar day)** — real-time Firestore counters, not a rolling 24h window (see
-`src/lib/stats.js`). Set `STATS_DIGEST_HOURS` to also post it automatically on that interval to
-the `stats` role.
+### Forum topics
 
-### Commands
+Each role (`main`/`lead`/`debug`/`stats`) goes to its own `*_CHAT_ID` if set, otherwise into a
+topic of the main chat if one is bound, otherwise it's disabled. To use one supergroup: leave
+`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID` empty and run `/set_topic <role> here` inside each
+topic. A topic ID only exists inside its own chat — never bind a topic to a role that has a
+dedicated `*_CHAT_ID` pointing at another chat (private chats have no topics at all). Details in
+`CLAUDE.md`.
 
-- `npm start` — run the bot (`node server.js`)
-- `npm test` — run the test suite (`node --test`, with dummy env vars preloaded via
-  `test/setupEnv.js` so tests don't need a real `.env`)
+### Statistics
+
+`/stats` lists only what happened today (UTC calendar day), e.g. "Лайки: 5", "Сообщения: 10";
+zero lines are omitted. VK events are counted after the secret check and deduplication, so VK's
+repeated deliveries aren't double-counted. Set `STATS_DIGEST_HOURS` to post it automatically to the
+`stats` role.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Like notifications without "(Всего: N)" | `VK_SERVICE_KEY` is a community key — use a user token |
+| No startup message, `message thread not found` in logs | A topic is bound to a role whose chat doesn't have it (e.g. a private chat) — `/set_topic <role> off` |
+| Render logs show nothing when things happen in VK | Event types not ticked in the community's Callback API settings |
+| `VK secret не совпал — запрос отклонён (403)` in logs | `VK_SECRET_KEY` differs from the Callback API secret |
+| `409 Conflict ... getUpdates` | Two bot instances on one token (brief overlap during a redeploy is normal) |
+| Event shown as `❓ <type>` | New VK event type — grab its payload with `/raw_event <type>` and add a handler |
 
 ### Health check
 
-`GET /health` returns `{ ok, uptime_sec, ts, firestore }` — `firestore` reflects a live
-(2s-timeout) connectivity check against the `bot_logs` collection, useful for readiness probes.
+`GET /health` returns `{ ok, uptime_sec, ts, firestore }`; `firestore` is a live 2s-timeout check
+against `bot_logs`.
 
 ### Known limitations
 
-- Long-polling (`node-telegram-bot-api`) means only **one instance** of the bot should run against
-  a given bot token at a time — running two causes a 409 conflict from Telegram.
-- `handlers/`, `utils/index.js`, `src/lib/events.js`, and `src/storage/{firebase,redis,supabase}.js`
-  are unwired legacy/scaffold code, not part of the running bot — see `CLAUDE.md` for details.
-  (`src/storage/firebase.js` is not the live Firebase integration despite the name — that's
-  `src/lib/db.js`.)
-- `src/worker.js` / `wrangler.jsonc` are an unfinished Cloudflare Worker migration stub.
-- `/stats` resets at UTC midnight (calendar-day counters) rather than a true rolling 24h window —
-  see `src/lib/stats.js`.
+- Long-polling means **one instance per bot token**.
+- `handlers/`, `utils/index.js`, `src/lib/events.js`, `src/storage/*` are unwired legacy code;
+  `src/worker.js` / `wrangler.jsonc` are an unfinished Cloudflare Worker stub. See `CLAUDE.md`.
+- `/stats` is a calendar-day counter (resets at UTC midnight), not a rolling 24h window.
+- Likes on clips get no counter: `toLikesApiType()` doesn't request one for the `clip` type (same
+  as the older solution this fork came from).
 
 ---
 
@@ -100,85 +118,103 @@ the `stats` role.
 
 ### Что делает
 
-- Принимает события VK Callback API на `POST /webhook`.
-- Отбрасывает повторные события (VK повторяет запрос, если не получает быстрый `ok`).
-- Формирует короткое HTML-уведомление под каждый тип события (новые посты, комментарии, лайки
-  с актуальным счётчиком, вступления/выходы из группы, заказы в маркете и т.д.) и отправляет его
-  в Telegram-чат через long-polling.
-- Предоставляет команды Telegram-бота (`/status`, `/toggle_event`, `/set_main_chat`,
-  `/set_topic`, `/stats` и др.) для просмотра и управления ботом в рантайме; админ-команды
-  защищены проверкой Telegram user ID.
-- Маршрутизирует уведомления по ролям (main/lead/debug/stats) — либо в отдельные чаты, либо (если
-  используется одна Telegram-супергруппа с включёнными темами) в отдельные темы внутри неё.
-- Пишет структурированные записи запросов/ответов в Firestore для наблюдаемости, со статистикой
-  в реальном времени (по запросу `/stats` или автоматически, если задан `STATS_DIGEST_HOURS`).
+- Принимает события VK Callback API на `POST /webhook` (с проверкой секрета и rate limit).
+- Отбрасывает повторные доставки — VK часто присылает одно и то же событие 2-5 раз за секунды.
+  Дедуп двухуровневый: кэш в памяти, затем коллекция Firestore `dedup_seen`, переживающая рестарт.
+- Формирует короткое HTML-уведомление под каждый тип события (посты, комментарии, лайки со
+  счётчиком, реакции на сообщения, вступления/выходы, заказы в маркете и т.д.) и отправляет его в
+  Telegram через long-polling.
+- Команды бота (`/status`, `/toggle_event`, `/set_topic`, `/stats`, `/raw_event` и др.) для
+  просмотра и управления в рантайме; админ-команды защищены проверкой Telegram user ID. Команды
+  видны в меню `/` и отвечают в той же теме форума, где их вызвали.
+- Маршрутизирует уведомления по ролям (main/lead/debug/stats) — в отдельные чаты или в темы одной
+  супергруппы с включёнными темами.
+- Пишет входящий и исходящий трафик в Firestore; `/stats` показывает активность за сегодня по
+  типам событий.
 
-Подробнее о потоке обработки запроса и структуре кода — в [`CLAUDE.md`](./CLAUDE.md), актуальная
-версия VK API, механизм подтверждения Callback API и полная карта событий — в
-[`docs/VK_API.md`](./docs/VK_API.md), а настройка проекта Firebase — в
-[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md).
+Подробнее: [`CLAUDE.md`](./CLAUDE.md) (поток запроса, структура кода),
+[`docs/VK_API.md`](./docs/VK_API.md) (версия API, подтверждение, токены доступа, карта событий),
+[`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) (настройка Firebase).
 
 ### Установка
 
 1. `npm install`
-2. Скопируйте `.env.example` в `.env` и заполните значения (см. комментарии в файле, откуда их
-   брать). Все переменные из раздела «Обязательные» строго обязательны — процесс завершится с
-   кодом 1 при старте, если хотя бы одна отсутствует (`src/config.js`).
-3. Настройте Firebase (бесплатного тарифа Spark достаточно) — полная инструкция в
-   [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md): создать проект, включить Firestore
-   (Native mode), сгенерировать ключ сервисного аккаунта и вставить его JSON в
-   `FIREBASE_SERVICE_ACCOUNT`. Миграции запускать не нужно — коллекции/документы создаются при
-   первой записи.
-4. В настройках сообщества VK укажите для Callback API адрес `https://<ваш-хост>/webhook` и тот
-   же секрет, что и в `VK_SECRET_KEY`.
-5. `npm start`
+2. Скопируйте `.env.example` в `.env` и заполните (комментарии объясняют каждое значение). Всё из
+   раздела «Обязательные» строго обязательно — без любой из переменных процесс завершится с кодом
+   1 при старте (`src/config.js`).
+3. Firebase (хватает бесплатного Spark) — см. [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md):
+   создать проект, включить Firestore (Native mode), вставить JSON ключа сервисного аккаунта в
+   `FIREBASE_SERVICE_ACCOUNT`, проверить `FIREBASE_FIRESTORE_DATABASE_ID`. Миграций нет.
+4. **`VK_SERVICE_KEY` — это пользовательский токен VK (`vk1.a...`), а не ключ доступа
+   сообщества.** VK не пускает ключи сообщества к методам `likes.*`, и счётчики лайков с таким
+   ключом молча не работают. Как получить пользовательский токен —
+   [`docs/VK_API.md`](./docs/VK_API.md).
+5. Сообщество VK → Управление → Работа с API → Callback API: адрес `https://<ваш-хост>/webhook`,
+   секретный ключ = `VK_SECRET_KEY` (строка, которую придумываете сами), строку подтверждения —
+   в `VK_CONFIRMATION_CODE`, и **отметьте нужные типы событий** на вкладке «Типы событий» —
+   одно подтверждение ни на что не подписывает.
+6. `npm start`. Стартовое сообщение (роль debug) покажет `VK_SERVICE_KEY: ✅ OK` или ошибку VK.
 
 ### Деплой
 
-[`render.yaml`](./render.yaml) — готовый Blueprint для [Render](https://render.com) (бесплатный
-тариф): в дашборде Render → New → Blueprint → выбрать этот репозиторий/форк, затем заполнить
-переменные, которые он запросит. На бесплатном тарифе веб-сервис «засыпает» примерно через 15
-минут без входящих HTTP-запросов, что также останавливает long-polling бота (контейнер целиком
-останавливается) — компромисс и обходной путь (keep-alive) описаны в комментарии в начале
-`render.yaml`. Подойдёт и любой другой Node.js-хостинг — достаточно, чтобы он запускал
-`npm start` и передавал свой `PORT`.
+[`render.yaml`](./render.yaml) — Blueprint для [Render](https://render.com) (бесплатный тариф):
+дашборд Render → New → Blueprint → выбрать репозиторий, заполнить запрошенные переменные. На
+бесплатном тарифе сервис засыпает примерно через 15 минут без входящих HTTP-запросов, и вместе с
+ним останавливается long-polling бота — компромисс и обход (keep-alive) описаны в `render.yaml`.
+Подойдёт любой хостинг с Node.js 18+, который запускает `npm start` и передаёт свой `PORT`.
 
-### Темы (forum topics) и статистика (опционально)
+### Команды Telegram
 
-Уведомления маршрутизируются по роли (`main`/`lead`/`debug`/`stats`), а не по жёстко заданному
-чату. По умолчанию каждая роль использует свою переменную чата (`TELEGRAM_CHAT_ID`/
-`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID`) — как и раньше. Чтобы вместо этого использовать
-одну Telegram-супергруппу с включёнными темами (Forum Topics): создайте тему для каждой нужной
-роли, выполните в ней `/topic_id`, чтобы получить её thread ID, затем либо задайте
-`TELEGRAM_TOPIC_{MAIN,LEAD,DEBUG,STATS}_ID` в `.env`, либо выполните `/set_topic <роль> here`
-прямо в теме (только админ). `/topics` покажет итоговый чат+тему по каждой роли. Роль без
-отдельного чата и без темы просто отключена — фича полностью опциональна. Порядок разрешения —
-в `CLAUDE.md`.
+| Команда | Доступ | Что делает |
+|---|---|---|
+| `/help` | все | Список команд |
+| `/status`, `/ping`, `/version` | все | Жив ли бот, задержка, версия и аптайм |
+| `/my_chat_id`, `/whoami`, `/topic_id` | все | ID чата, твой ID и признак админа, ID текущей темы |
+| `/topics` | админ | Итоговый чат + тема по каждой роли |
+| `/set_topic <роль> <id\|here\|off>` | админ | Привязать тему к роли (`here` — тема, где пишешь) |
+| `/list_events`, `/toggle_event <тип>` | админ | Показать / включить-выключить типы событий VK |
+| `/set_main_chat <id>`, `/send_main <текст>` | админ | Сменить основной чат / написать в него |
+| `/test_notification` | админ | Тестовое сообщение в debug |
+| `/stats` | админ | Активность за сегодня (UTC) по типам событий |
+| `/raw_event [тип]` | админ | Сырой JSON последнего VK-события из `bot_logs` (для незнакомых типов) |
 
-`/stats` (админ) публикует дайджест (события VK, трафик Telegram, ошибки, топ типов событий VK)
-за **сегодня (календарные сутки UTC)** — счётчики Firestore в реальном времени, а не скользящее
-окно 24ч (см. `src/lib/stats.js`). Задайте `STATS_DIGEST_HOURS`, чтобы дайджест публиковался
-автоматически с этим интервалом в роль `stats`.
+### Темы форума
 
-### Команды
+Роль (`main`/`lead`/`debug`/`stats`) идёт в свой `*_CHAT_ID`, если он задан, иначе — в тему
+основного чата, если она привязана, иначе роль отключена. Для одной супергруппы: оставьте
+`LEAD_CHAT_ID`/`DEBUG_CHAT_ID`/`STATS_CHAT_ID` пустыми и выполните `/set_topic <роль> here` внутри
+каждой темы. ID темы существует только внутри своего чата — не привязывайте тему к роли, у которой
+задан отдельный `*_CHAT_ID` на другой чат (в личных чатах тем нет вовсе). Подробности в
+`CLAUDE.md`.
 
-- `npm start` — запуск бота (`node server.js`)
-- `npm test` — запуск тестов (`node --test`; заглушки env-переменных подгружаются через
-  `test/setupEnv.js`, поэтому реальный `.env` для тестов не нужен)
+### Статистика
+
+`/stats` показывает только то, что реально было сегодня (календарные сутки UTC), например
+«Лайки: 5», «Сообщения: 10»; нулевые строки не выводятся. События VK считаются после проверки
+секрета и дедупа, поэтому повторные доставки VK не завышают цифры. `STATS_DIGEST_HOURS` включает
+автоматическую отправку в роль `stats`.
+
+### Диагностика
+
+| Симптом | Вероятная причина |
+|---|---|
+| Уведомления о лайках без «(Всего: N)» | В `VK_SERVICE_KEY` ключ сообщества — нужен пользовательский токен |
+| Нет стартового сообщения, в логах `message thread not found` | К роли привязана тема, которой нет в её чате (например, в личке) — `/set_topic <роль> off` |
+| В VK события есть, а в логах Render пусто | Не отмечены типы событий в настройках Callback API сообщества |
+| В логах `VK secret не совпал — запрос отклонён (403)` | `VK_SECRET_KEY` не совпадает с секретом Callback API |
+| `409 Conflict ... getUpdates` | Два инстанса на одном токене (кратко при редеплое — норма) |
+| Событие пришло как `❓ <тип>` | Новый тип события VK — достаньте payload через `/raw_event <тип>` и добавьте обработчик |
 
 ### Health-check
 
-`GET /health` возвращает `{ ok, uptime_sec, ts, firestore }` — поле `firestore` отражает живую
-проверку связи с коллекцией `bot_logs` (с таймаутом 2с), полезно для readiness-проб.
+`GET /health` возвращает `{ ok, uptime_sec, ts, firestore }`; `firestore` — живая проверка связи с
+`bot_logs` (таймаут 2с).
 
 ### Известные ограничения
 
-- Long-polling (`node-telegram-bot-api`) означает, что на один токен бота должен работать **только
-  один** инстанс — два одновременно вызовут конфликт 409 от Telegram.
-- `handlers/`, `utils/index.js`, `src/lib/events.js` и `src/storage/{firebase,redis,supabase}.js` —
-  неподключённый старый/заготовочный код, не часть работающего бота — подробности в `CLAUDE.md`.
-  (`src/storage/firebase.js`, несмотря на название, — не настоящая интеграция Firebase, это
-  `src/lib/db.js`.)
-- `src/worker.js` / `wrangler.jsonc` — незавершённая заготовка миграции на Cloudflare Worker.
-- `/stats` обнуляется в полночь UTC (счётчик за календарные сутки), а не скользящее окно 24ч —
-  см. `src/lib/stats.js`.
+- Long-polling — **один инстанс на токен бота**.
+- `handlers/`, `utils/index.js`, `src/lib/events.js`, `src/storage/*` — неподключённый старый код;
+  `src/worker.js` / `wrangler.jsonc` — незавершённая заготовка Cloudflare Worker. См. `CLAUDE.md`.
+- `/stats` — счётчик за календарные сутки (обнуляется в полночь UTC), а не скользящее окно 24ч.
+- У лайков на клипы счётчика нет: `toLikesApiType()` не запрашивает его для типа `clip` (так же,
+  как в исходном решении).

@@ -93,7 +93,7 @@ Callback API**) VK присылает `POST` с `{"type": "confirmation", "group
 Единственный надёжный источник актуального списка типов Callback API — чекбоксы на
 странице **Управление → Работа с API → Callback API** конкретного сообщества (VK может
 включать/выключать типы по своему усмотрению без объявления в публичном changelog).
-Ниже — то, что реализовано в коде на 2026-09-02.
+Ниже — то, что реализовано в коде на 2026-09-22.
 
 | Тип события VK | Ключ в `state.eventToggleState` | `case` в `handleVkEvent()` |
 |---|---|---|
@@ -102,7 +102,7 @@ Callback API**) VK присылает `POST` с `{"type": "confirmation", "group
 | `message_edit` | ✅ | ✅ |
 | `message_allow` | ✅ | ✅ |
 | `message_deny` | ✅ | ✅ |
-| `message_typing_state` | ✅ (по умолчанию выкл — шум) | ✅ |
+| `message_typing_state` | ✅ (по умолчанию выкл — шум) | `case` есть, но фактически не вызывается: быстрый ack в `server.js`, как у `message_read` |
 | `message_read` | ✅ (по умолчанию выкл — шум) | быстрый ack в `server.js`, не доходит до `handleVkEvent` |
 | `message_event` | ✅ | ✅ |
 | `message_reaction_event` | ✅ | ✅ |
@@ -126,6 +126,17 @@ Callback API**) VK присылает `POST` с `{"type": "confirmation", "group
 | `lead_forms_new` | ✅ | ✅ |
 | `app_payload` | ✅ | ✅ |
 | `vkpay_transaction` | ✅ | ✅ |
+| `topic_comment_new` | — | ✅ — лишний `case`: такого типа в Callback API нет (комментарии в обсуждениях приходят как `board_post_*`), безвреден |
+
+Про лайки (`like_add` / `like_remove`):
+- Владелец объекта приходит в поле `object_owner_id` (не `owner_id`) — код читает его с фолбэком
+  на `-VK_GROUP_ID`.
+- Счётчик «(Всего: N)» — это отдельный вызов `likes.getList`, он работает **только с
+  пользовательским токеном** в `VK_SERVICE_KEY` (см. «Тип токена» выше).
+- Для клипов счётчика нет: `toLikesApiType()` в `src/vk/format.js` не пропускает тип `clip`
+  (у старого решения так же).
+- VK регулярно шлёт одно и то же событие лайка 2-5 раз за секунды — их отсекает дедуп
+  (`src/vk/dedup.js`), в `/stats` учитывается только первое.
 
 До 2026-09-02 было расхождение: `message_edit`, `message_event`, `market_order_edit`,
 `app_payload`, `vkpay_transaction` имели `case`, но не были в `eventToggleState`

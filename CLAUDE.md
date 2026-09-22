@@ -29,7 +29,11 @@ formatted notifications to Telegram via long-polling (`node-telegram-bot-api`). 
 `server.js` boots through `src/config.js`, which calls `process.exit(1)` if any of these are
 missing: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (the full JSON of a Firebase service-account key,
-as one string — see `docs/FIREBASE_SETUP.md`). Optional: `FIREBASE_FIRESTORE_DATABASE_ID`
+as one string — see `docs/FIREBASE_SETUP.md`). **`VK_SERVICE_KEY` must be a VK *user* access token,
+not a community access key**: VK blocks the whole `likes.*` section for community keys (error 27,
+"method is unavailable with group auth"), so like counters silently vanish while `users.get`
+keeps working — see `docs/VK_API.md`. `VK_SECRET_KEY` is not a VK credential at all, just the
+Callback API secret string you choose. Optional: `FIREBASE_FIRESTORE_DATABASE_ID`
 (defaults to `default` — `src/lib/db.js` always passes a Firestore database ID explicitly rather
 than relying on the `getFirestore(app)` default of the special `(default)` database, which this
 project's database is *not* named — see the warning in `docs/FIREBASE_SETUP.md`), `LEAD_CHAT_ID`, `DEBUG_CHAT_ID`,
@@ -43,12 +47,27 @@ are created on first write (`docs/FIREBASE_SETUP.md` lists what gets created and
 ### Request flow (the live code path)
 
 ```
-VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache first, 10 min TTL, md5 hash of {type, objectId, actorId, groupId, date}; falls through to a Firestore `dedup_seen` lookup — see below) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) resolves the target chat + optional forum-topic message_thread_id (see below) → sendTelegramMessageWithRetry (3 retries, 1s/2s/3s backoff, failures echoed to the "debug" role and logged via src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → per-IP rate limit (src/security/rateLimit.js) → timing-safe secret check (VK_SECRET_KEY, crypto.timingSafeEqual) → respond "ok" immediately (VK requires a fast ack or it retries) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (in-memory NodeCache first, 10 min TTL, md5 hash of {type, objectId, actorId, groupId, date}; falls through to a Firestore `dedup_seen` lookup — see below) → logger.info({source:'vk', event:'processed_event'}) (what `/stats` counts) → src/vk/events.js: handleVkEvent({ type, object }) → checks src/state.js eventToggleState (per-type on/off, runtime-mutable via Telegram commands) → builds a short HTML message (emoji + VK deep link + optional live like counter fetched from VK API) per event type via a big switch statement, using pure link/declension helpers from src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) resolves the target chat + optional forum-topic message_thread_id (see below) → sendTelegramMessageWithRetry (3 retries, 1s/2s/3s backoff, failures echoed to the "debug" role and logged via src/lib/logger.js)
 ```
 
 Telegram → bot commands are registered in `src/commands.js` via `bot.onText`, using the same
 long-polling `bot` instance from `src/telegram.js`. Admin-only commands check
-`isAdmin()` (`src/state.js`) against `ADMIN_USER_IDS`.
+`isAdmin()` (`src/state.js`) against `ADMIN_USER_IDS`. Command replies go through the local
+`reply(msg, …)` helper, which echoes `msg.message_thread_id` so a command typed inside a forum
+topic answers in that topic (plain `sendTelegramMessageWithRetry(msg.chat.id, …)` lands in
+General). Don't use `reply()` when the target is a *different* chat (`/send_main`,
+`/test_notification` with `DEBUG_CHAT_ID`) — a thread ID only exists inside its own chat. The
+command list is also registered with `bot.setMyCommands()` for Telegram's `/` menu — keep it, the
+`/help` text and the unknown-command regex in sync when adding a command.
+
+Logging: `src/lib/logger.js` batches records into the Firestore `bot_logs` collection. Incoming VK
+webhooks are logged by `logMiddlewareVK()` (with the `secret` field stripped — `/raw_event` echoes
+logged payloads into Telegram), incoming Telegram messages by `logIncomingTelegram()` from
+`bot.on('message')` in `src/telegram.js` (the bot long-polls, so there's no Express route for it),
+outgoing messages by `logOutgoingMessage()` inside `sendTelegramMessageWithRetry`. `server.js`
+also sends a startup message to the `debug` role that includes a `checkVkServiceKey()` result
+(`groups.getById` — a weak check: it passes with a community key too, so it doesn't prove like
+counters will work).
 
 The dedup cache has two tiers: an in-process `NodeCache` (fast, no network round-trip, but reset
 on every restart) checked first, and — only on a cache miss — a Firestore lookup/write against the
@@ -123,13 +142,20 @@ the resolved chat+thread per role.
 
 No SQL views here (Firestore is NoSQL) — instead, `bumpStatsCounters()` atomically increments
 fields on today's `stats_daily/<YYYY-MM-DD>` (UTC) document every time `src/lib/logger.js` writes a
-log record, keyed off `source`/`event`/`level`; VK event types go into a `vk_event_types` map
-(field-path segment sanitized against the untrusted webhook `type` before use — see the function's
-comment). This means `/stats` is a **calendar-day counter reset at UTC midnight**, not the old
-Supabase version's rolling 24-hour SQL aggregate — deliberate trade-off for minimal Firestore
-reads/writes on the free (Spark) tier; no historical/daily-trend queries. `getOverview24h()` /
+log record, keyed off `source`/`event`/`level`. VK events are counted on `processed_event` (logged
+by `server.js` after the secret check and dedup), **not** on the raw `incoming_update` — counting
+raw deliveries inflated the numbers with VK's repeated deliveries, confirmations and 403s. VK event
+types go into a nested `vk_event_types` map (field-path segment sanitized against the untrusted
+webhook `type`). Build that update as a nested object (`{ vk_event_types: { [type]: inc } }`), never
+as a dotted string key: `set(…, {merge: true})` doesn't split dots (only `update()` does), so a
+`"vk_event_types.like_add"` key creates a literal top-level field with a dot in its name — that bug
+kept the per-type breakdown empty for a while. `/stats` is a **calendar-day counter reset at UTC
+midnight**, not a rolling 24-hour window — deliberate trade-off for minimal Firestore reads/writes
+on the free (Spark) tier; no historical/daily-trend queries. `getOverview24h()` /
 `getTopVkEventTypes()` read that one document; `formatDigest` is pure and unit-tested
-(`test/lib/stats.test.js`). The `/stats` admin command sends it on demand; if `STATS_DIGEST_HOURS`
+(`test/lib/stats.test.js`): it omits zero lines, prints "Событий не было." when nothing happened,
+and labels VK types via `VK_TYPE_LABELS` (raw type as fallback). The `/stats` admin command sends
+it on demand; if `STATS_DIGEST_HOURS`
 is set, `server.js` also posts it automatically on that interval to the `stats` role (see Forum
 topics above) — unset by default, so existing deployments get no new automatic messages unless
 explicitly opted in.
@@ -156,6 +182,12 @@ described below before it ships.
 4. Keep the toggle key and the switch `case` in sync — every key declared in
    `state.eventToggleState` should have a matching `case`, otherwise it silently falls through to
    the generic `❓ <type>` default message.
+5. Add a Russian label to `VK_TYPE_LABELS` in `src/lib/stats.js` (used by `/stats`).
+6. If the event's `object` has no `id`/`date` and uses new field names, check that
+   `buildKey()` in `src/vk/dedup.js` picks up its object and actor IDs — otherwise distinct events
+   collapse into one dedup key and all but the first are dropped (happened with `like_add`).
+7. Add the row to the table in `docs/VK_API.md`. To see a real payload of an unknown type, use
+   `/raw_event <type>` in the bot.
 
 ### Testing conventions
 
@@ -204,7 +236,11 @@ Node.js-бот, который принимает события VK Callback API
 `server.js` запускается через `src/config.js`, который вызывает `process.exit(1)`, если
 отсутствует хотя бы одна из переменных: `VK_GROUP_ID`, `VK_SECRET_KEY`, `VK_SERVICE_KEY`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FIREBASE_SERVICE_ACCOUNT` (весь JSON сервисного
-аккаунта Firebase одной строкой — см. `docs/FIREBASE_SETUP.md`). Необязательные:
+аккаунта Firebase одной строкой — см. `docs/FIREBASE_SETUP.md`). **`VK_SERVICE_KEY` — это
+пользовательский токен VK, а не ключ доступа сообщества**: VK закрывает для ключей сообщества весь
+раздел `likes.*` (ошибка 27, «method is unavailable with group auth»), и счётчики лайков молча
+пропадают, хотя `users.get` работает — см. `docs/VK_API.md`. `VK_SECRET_KEY` вообще не credential
+VK, а придуманная вами строка-секрет Callback API. Необязательные:
 `FIREBASE_FIRESTORE_DATABASE_ID` (по умолчанию `default` — `src/lib/db.js` всегда передаёт ID базы
 Firestore явно, а не полагается на дефолт `getFirestore(app)`, который ищет специальную базу
 `(default)` — а база этого проекта называется иначе, см. предупреждение в
@@ -220,12 +256,26 @@ Render — имеют приоритет). См. `.env.example` для гото�
 ### Поток обработки запроса (реальный рабочий путь кода)
 
 ```
-VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (сначала кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, actorId, groupId, date}; при промахе — резервная проверка в Firestore, коллекция `dedup_seen`, см. ниже) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) определяет целевой чат + опциональный message_thread_id темы форума (см. ниже) → sendTelegramMessageWithRetry (3 попытки, задержки 1с/2с/3с, ошибки дублируются в роль "debug" и логируются через src/lib/logger.js)
+VK Callback API → POST /webhook (server.js) → rate limit по IP (src/security/rateLimit.js) → timing-safe проверка секрета (VK_SECRET_KEY, crypto.timingSafeEqual) → немедленный ответ "ok" (VK требует быстрого подтверждения, иначе повторяет запрос) → src/vk/dedup.js: shouldProcessEvent / rememberEvent (сначала кэш NodeCache в памяти процесса, TTL 10 минут, md5-хэш от {type, objectId, actorId, groupId, date}; при промахе — резервная проверка в Firestore, коллекция `dedup_seen`, см. ниже) → logger.info({source:'vk', event:'processed_event'}) (именно это считает `/stats`) → src/vk/events.js: handleVkEvent({ type, object }) → проверка src/state.js eventToggleState (вкл/выкл по типу события, изменяется в рантайме через команды Telegram) → формирование короткого HTML-сообщения (эмодзи + прямая ссылка VK + опциональный актуальный счётчик лайков из VK API) для каждого типа события через большой switch, с использованием чистых хелперов ссылок/склонений из src/vk/format.js → src/telegram.js: sendToRole('main'|'lead', …) определяет целевой чат + опциональный message_thread_id темы форума (см. ниже) → sendTelegramMessageWithRetry (3 попытки, задержки 1с/2с/3с, ошибки дублируются в роль "debug" и логируются через src/lib/logger.js)
 ```
 
 Команды Telegram → бот регистрируются в `src/commands.js` через `bot.onText`, используя тот же
 экземпляр `bot` (long-polling) из `src/telegram.js`. Команды только для администратора проверяют
-`isAdmin()` (`src/state.js`) по списку `ADMIN_USER_IDS`.
+`isAdmin()` (`src/state.js`) по списку `ADMIN_USER_IDS`. Ответы команд идут через локальный
+хелпер `reply(msg, …)`, который возвращает `msg.message_thread_id` — команда, набранная в теме
+форума, отвечает в эту же тему (голый `sendTelegramMessageWithRetry(msg.chat.id, …)` уходит в
+General). Не используйте `reply()`, если отправка идёт в *другой* чат (`/send_main`,
+`/test_notification` с `DEBUG_CHAT_ID`) — ID темы существует только внутри своего чата. Список
+команд также регистрируется через `bot.setMyCommands()` для меню `/` в Telegram — при добавлении
+команды держите в синхроне его, текст `/help` и регулярку неизвестных команд.
+
+Логирование: `src/lib/logger.js` пакетно пишет записи в коллекцию Firestore `bot_logs`. Входящие
+вебхуки VK — `logMiddlewareVK()` (поле `secret` вырезается: `/raw_event` выводит сохранённые
+payload в Telegram), входящие сообщения Telegram — `logIncomingTelegram()` из `bot.on('message')`
+в `src/telegram.js` (бот работает через long-polling, Express-маршрута для него нет), исходящие —
+`logOutgoingMessage()` внутри `sendTelegramMessageWithRetry`. `server.js` при старте шлёт в роль
+`debug` сообщение с результатом `checkVkServiceKey()` (`groups.getById` — слабая проверка: проходит
+и с ключом сообщества, поэтому работу счётчиков лайков она не доказывает).
 
 Дедуп двухуровневый: сначала быстрый in-memory `NodeCache` (без похода в сеть, но сбрасывается при
 каждом рестарте), и только при промахе — проверка/запись в Firestore-коллекцию `dedup_seen`
@@ -300,13 +350,20 @@ VK Callback API → POST /webhook (server.js) → rate limit по IP (src/securi
 
 SQL-вьюх здесь нет (Firestore — NoSQL): вместо них `bumpStatsCounters()` атомарно инкрементирует
 поля в документе `stats_daily/<YYYY-MM-DD>` (UTC) за сегодня при каждой записи лога в
-`src/lib/logger.js`, ориентируясь на `source`/`event`/`level`; типы событий VK попадают в карту
-`vk_event_types` (сегмент пути поля санитизируется против недоверенного `type` из вебхука — см.
-комментарий у функции). Это значит, что `/stats` — **счётчик за календарные сутки, обнуляемый в
-полночь UTC**, а не скользящий 24-часовой SQL-агрегат прежней Supabase-версии — осознанный
-компромисс ради минимума чтений/записей на бесплатном (Spark) тарифе Firestore; истории/дневных
-трендов больше нет. `getOverview24h()`/`getTopVkEventTypes()` читают этот один документ;
-`formatDigest` — чистая функция, покрыта тестом (`test/lib/stats.test.js`). Админ-команда `/stats`
+`src/lib/logger.js`, ориентируясь на `source`/`event`/`level`. События VK считаются по
+`processed_event` (его пишет `server.js` после проверки секрета и дедупа), **а не** по сырому
+`incoming_update` — подсчёт сырых доставок завышал цифры повторными доставками VK, confirmation и
+запросами с 403. Типы событий VK попадают во вложенную карту `vk_event_types` (сегмент пути поля
+санитизируется против недоверенного `type` из вебхука). Обновление строится вложенным объектом
+(`{ vk_event_types: { [type]: inc } }`), а не строковым ключом с точкой: `set(…, {merge: true})`
+точки не разбирает (это делает только `update()`), и ключ `"vk_event_types.like_add"` создаёт
+отдельное поле с точкой в имени — из-за этого разбивка по типам какое-то время была пустой.
+`/stats` — **счётчик за календарные сутки, обнуляемый в полночь UTC**, а не скользящее окно 24ч —
+осознанный компромисс ради минимума чтений/записей на бесплатном (Spark) тарифе Firestore;
+истории/дневных трендов нет. `getOverview24h()`/`getTopVkEventTypes()` читают этот один документ;
+`formatDigest` — чистая функция, покрыта тестом (`test/lib/stats.test.js`): не выводит нулевые
+строки, пишет «Событий не было.», если ничего не случилось, и подписывает типы VK через
+`VK_TYPE_LABELS` (с фолбэком на сырой тип). Админ-команда `/stats`
 шлёт его по запросу; если задан `STATS_DIGEST_HOURS`, `server.js` также публикует его
 автоматически с этим интервалом в роль `stats` (см. «Темы» выше) — по умолчанию не задан, так что
 у существующих развёртываний новые автоматические сообщения не появляются без явного включения.
@@ -333,6 +390,12 @@ SQL-вьюх здесь нет (Firestore — NoSQL): вместо них `bumpS
 4. Держите ключ тумблера и `case` в switch синхронизированными — каждый ключ, объявленный в
    `state.eventToggleState`, должен иметь соответствующий `case`, иначе он молча попадёт в общий
    дефолтный `❓ <type>`.
+5. Добавьте русскую подпись в `VK_TYPE_LABELS` в `src/lib/stats.js` (используется в `/stats`).
+6. Если у `object` события нет `id`/`date` и поля называются по-новому — проверьте, что
+   `buildKey()` в `src/vk/dedup.js` подхватывает ID объекта и актёра, иначе разные события
+   схлопнутся в один ключ дедупа и дойдёт только первое (так было с `like_add`).
+7. Добавьте строку в таблицу `docs/VK_API.md`. Реальный payload незнакомого типа можно получить
+   командой `/raw_event <тип>` в боте.
 
 ### Соглашения по тестированию
 
