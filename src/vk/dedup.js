@@ -4,6 +4,9 @@ const NodeCache = require('node-cache');
 
 const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
+// Сколько хранить ключ в Firestore (dedup_seen). Окно повторов VK — минуты, сутки с запасом.
+const DEDUP_PERSIST_MS = 24 * 60 * 60 * 1000;
+
 function buildKey({ type, object, group_id }) {
   // object_id — реальное поле VK для like_add/like_remove (см. src/vk/events.js, ev.object_id) —
   // раньше отсутствовало здесь, из-за чего все like_add-события (у них нет и object.date) хэшировались
@@ -59,8 +62,11 @@ function rememberEvent(ctx, db) {
   const key = buildKey(ctx);
   cache.set(key, true);
   if (!db) return;
-  // Fire-and-forget — не задерживаем обработку события ожиданием записи.
-  db.collection('dedup_seen').doc(key).set({ ts: new Date().toISOString() })
+  // Fire-and-forget — не задерживаем обработку события ожиданием записи. expireAt — Date
+  // (в Firestore это Timestamp): TTL-политика Firestore работает только с полями этого типа,
+  // строковую дату она игнорирует. См. docs/FIREBASE_SETUP.md.
+  const now = Date.now();
+  db.collection('dedup_seen').doc(key).set({ ts: new Date(now), expireAt: new Date(now + DEDUP_PERSIST_MS) })
     .catch(e => console.warn('[dedup] Не удалось сохранить ключ в Firestore:', e.message));
 }
 

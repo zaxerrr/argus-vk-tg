@@ -20,7 +20,10 @@ function todayDocId() {
 function bumpStatsCounters(rec) {
   const updates = {};
 
-  if (rec.source === 'vk' && rec.event === 'incoming_update') {
+  // Считаем только события, прошедшие проверку секрета и дедуп (server.js логирует processed_event
+  // после rememberEvent). Раньше считались сырые доставки incoming_update — в статистику попадали
+  // повторные доставки VK, confirmation и запросы с неверным секретом.
+  if (rec.source === 'vk' && rec.event === 'processed_event') {
     updates.vk_events = FieldValue.increment(1);
     const rawType = rec.payload && rec.payload.type;
     // Тип события VK приходит из внешнего вебхука — используется как сегмент пути поля Firestore,

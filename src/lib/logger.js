@@ -99,28 +99,24 @@ function withRequestId () {
   };
 }
 
-function logMiddlewareTelegram () {
-  return (req, _res, next) => {
-    const body = req.body || {};
-    const chatId = body?.message?.chat?.id ?? body?.callback_query?.message?.chat?.id;
-    const userId = body?.message?.from?.id ?? body?.callback_query?.from?.id;
-    logger.info({
-      source: 'telegram',
-      event: 'incoming_update',
-      request_id: req.requestId,
-      direction: 'in',
-      chat_id: chatId ? String(chatId) : undefined,
-      user_id: userId ? String(userId) : undefined,
-      summary: body?.message?.text || body?.callback_query?.data || 'update',
-      payload: body,
-    });
-    next();
-  };
+// Бот работает через long-polling, а не вебхук, поэтому входящие Telegram-сообщения логируются
+// из обработчика bot.on('message') в src/telegram.js, а не Express-middleware.
+function logIncomingTelegram (msg) {
+  logger.info({
+    source: 'telegram',
+    event: 'incoming_update',
+    direction: 'in',
+    chat_id: msg?.chat?.id != null ? String(msg.chat.id) : undefined,
+    user_id: msg?.from?.id != null ? String(msg.from.id) : undefined,
+    summary: msg?.text || 'update',
+  });
 }
 
 function logMiddlewareVK () {
   return (req, _res, next) => {
-    const body = req.body || {};
+    // Поле secret — это VK_SECRET_KEY: не пишем его в bot_logs (оттуда payload читает /raw_event
+    // и выводит в Telegram).
+    const { secret: _secret, ...body } = req.body || {};
     const obj  = body?.object || {};
     const peer = obj?.peer_id || obj?.message?.peer_id || obj?.chat_id;
     const from = obj?.from_id || obj?.message?.from_id;
@@ -167,7 +163,7 @@ function logError (source, event, err, extra = {}) {
 module.exports = {
   logger,
   withRequestId,
-  logMiddlewareTelegram,
+  logIncomingTelegram,
   logMiddlewareVK,
   logOutgoingMessage,
   logError,

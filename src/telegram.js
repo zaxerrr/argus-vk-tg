@@ -12,6 +12,10 @@ function logOutgoing (chatId, text) {
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
+bot.on('message', msg => {
+  try { require('./lib/logger').logIncomingTelegram(msg); } catch (_) {}
+});
+
 // Отдельный чат на роль (старый способ — несколько чатов). "main" всегда — основной чат.
 const ROLE_CHAT_ENV = { lead: LEAD_CHAT_ID, debug: DEBUG_CHAT_ID, stats: STATS_CHAT_ID };
 

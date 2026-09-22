@@ -251,7 +251,7 @@ function registerCommands(bot) {
         .find(r => r.source === 'vk' && (!wantedType || (r.payload && r.payload.type === wantedType)));
       if (!doc) {
         const hint = wantedType ? ` типа <code>${escapeHtml(wantedType)}</code>` : '';
-        await reply(msg, `Событие${hint} не найдено среди последних 30 VK-записей в bot_logs.`, { parse_mode: 'HTML' });
+        await reply(msg, `Событие${hint} не найдено среди последних 50 записей в bot_logs.`, { parse_mode: 'HTML' });
         return;
       }
       const json = JSON.stringify(doc.payload, null, 2);

@@ -35,6 +35,9 @@ services:
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT
         sync: false
+      # ID базы Firestore; без переменной — "default" (см. docs/FIREBASE_SETUP.md)
+      - key: FIREBASE_FIRESTORE_DATABASE_ID
+        value: default
       - key: LEAD_CHAT_ID
         sync: false
       - key: DEBUG_CHAT_ID

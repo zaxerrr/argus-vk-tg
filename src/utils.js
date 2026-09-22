@@ -12,15 +12,18 @@ function escapeHtml(text) {
     .replace(/'/g, '&#039;');
 }
 
+// Возвращает сырой текст — экранирует вызывающий (userLink в src/vk/events.js), иначе имена
+// с &/</" экранировались дважды.
 async function getVkUserName(userId) {
   try {
     const resp = await axios.get('https://api.vk.com/method/users.get', {
-      params: { user_ids: userId, access_token: VK_SERVICE_KEY, v: '5.199', lang: 'ru' }
+      params: { user_ids: userId, access_token: VK_SERVICE_KEY, v: '5.199', lang: 'ru' },
+      timeout: 5000
     });
     const u = resp.data?.response?.[0];
     if (!u) return `ID ${userId}`;
     if (u.deactivated) return `[Деактивирован] ID ${userId}`;
-    return `${escapeHtml(u.first_name)} ${escapeHtml(u.last_name)}`;
+    return `${u.first_name} ${u.last_name}`;
   } catch (e) {
     console.error('VK users.get error:', e.message);
     return `ID ${userId}`;

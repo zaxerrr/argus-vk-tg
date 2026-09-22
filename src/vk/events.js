@@ -125,7 +125,7 @@ async function handleVkEvent({ type, object }) {
     /* ---------- Лайки (лаконично + СЧЁТЧИК) ---------- */
     case 'like_add': {
       const ev = object;
-      const ownerId = ev.owner_id || -Number(VK_GROUP_ID);
+      const ownerId = ev.object_owner_id || ev.owner_id || -Number(VK_GROUP_ID);
       const u = await userLink(ev.liker_id);
       const noun = objNounDative(ev.object_type);
       const link = buildObjectLink(ownerId, ev.object_type, ev.object_id, ev.post_id);
@@ -138,7 +138,7 @@ async function handleVkEvent({ type, object }) {
     }
     case 'like_remove': {
       const ev = object;
-      const ownerId = ev.owner_id || -Number(VK_GROUP_ID);
+      const ownerId = ev.object_owner_id || ev.owner_id || -Number(VK_GROUP_ID);
       const u = await userLink(ev.liker_id);
       const noun = objNounAblative(ev.object_type);
       const link = buildObjectLink(ownerId, ev.object_type, ev.object_id, ev.post_id);

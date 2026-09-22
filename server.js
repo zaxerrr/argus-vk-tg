@@ -112,6 +112,7 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
       return;
     }
     rememberEvent({ type, object, group_id }, db);
+    logger.info({ source: 'vk', event: 'processed_event', request_id: req.requestId, summary: type, payload: { type } });
 
     // Обработка события
     await handleVkEvent({ type, object });
