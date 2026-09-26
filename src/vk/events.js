@@ -1,10 +1,10 @@
 // src/vk/events.js — лаконичные уведомления VK Callback API (HTML + ссылки + счётчики лайков)
 
-const axios = require('axios');
 const { state, shouldDeliver } = require('../state'); // может быть undefined — см. allowDeliver()
 const { sendToRole } = require('../telegram');
-const { escapeHtml, getVkUserName } = require('../utils');
-const { VK_GROUP_ID, VK_SERVICE_KEY } = require('../config');
+const { escapeHtml, getVkUserName, vkOwnerUrl } = require('../utils');
+const { VK_GROUP_ID } = require('../config');
+const { vkApi, formatVkError } = require('./api');
 const { objNounDative, objNounAblative, absOwner, buildObjectLink, toLikesApiType } = require('./format');
 
 /* ================== вспомогательные функции ================== */
@@ -25,37 +25,23 @@ async function notifyLEAD(html) {
   await sendToRole('lead', html, { parse_mode: 'HTML' });
 }
 
+// Отрицательный ID — сообщество (ссылка club…, название через groups.getById).
 async function userLink(id) {
   const name = await getVkUserName(id).catch(() => `id${id}`);
-  return `<a href="https://vk.com/id${id}">${escapeHtml(name)}</a>`;
+  return `<a href="${vkOwnerUrl(id)}">${escapeHtml(name)}</a>`;
 }
 
 async function tryGetLikesCount(ownerId, objectId, objectType) {
   const type = toLikesApiType(objectType);
-  if (!type || !VK_SERVICE_KEY) return null;
-  const params = {
-    access_token: VK_SERVICE_KEY,
-    v: '5.199',
-    type,
-    owner_id: ownerId,
-    item_id: objectId,
-    count: 0
-  };
-  try {
-    // 3с (значение в исходном решении) регулярно не хватало на Render free tier сразу после
-    // "пробуждения" из сна — первый исходящий запрос с холодного контейнера может быть заметно
-    // медленнее обычного. Таймаут увеличен; сбой теперь дополнительно виден в логе (см. ниже).
-    const { data } = await axios.get('https://api.vk.com/method/likes.getList', { params, timeout: 8000 });
-    if (data && data.response && typeof data.response.count === 'number') return data.response.count;
-    // VK API возвращает ошибки в теле ответа (HTTP 200 + {"error": {...}}), а не HTTP-кодом —
-    // axios здесь ничего не бросает, поэтому без явного лога такой сбой был неотличим от "просто
-    // нет данных" и счётчик молча пропадал из сообщения.
-    if (data && data.error) {
-      console.warn(`[likes] likes.getList вернул ошибку VK API (code ${data.error.error_code}): ${data.error.error_msg}`);
-    }
-  } catch (e) {
-    console.warn('[likes] likes.getList: запрос не выполнен:', e.message);
-  }
+  if (!type) return null;
+  // 8с, а не 3с как в исходном решении: первый исходящий запрос с только что "проснувшегося"
+  // контейнера Render free заметно медленнее обычного. Ошибки VK API приходят в теле ответа
+  // (HTTP 200) — без явного лога сбой был неотличим от "нет данных".
+  const { response, error } = await vkApi('likes.getList', {
+    type, owner_id: ownerId, item_id: objectId, count: 1
+  }, { timeout: 8000 });
+  if (response && typeof response.count === 'number') return response.count;
+  if (error) console.warn(`[likes] likes.getList(${type} ${ownerId}_${objectId}): ${formatVkError(error)}`);
   return null;
 }
 
@@ -79,16 +65,19 @@ async function handleVkEvent({ type, object }) {
       msg = `💬 ${u} написал(а)`;
       break;
     }
+    // message_reply/message_edit — исходящие сообщения сообщества: from_id здесь — само
+    // сообщество (отрицательный), адресат — peer_id. VK шлёт message_edit только для сообщений
+    // сообщества/бота (dev.vk.com, «События в сообществах»).
     case 'message_reply': {
       const r = object;
-      const u = await userLink(r.from_id);
+      const u = await userLink(r.peer_id || r.from_id);
       msg = `↩️ Ответ отправлен: ${u}`;
       break;
     }
     case 'message_edit': {
       const r = object;
-      const u = await userLink(r.from_id);
-      msg = `✏️ ${u} отредактировал(а) сообщение`;
+      const u = await userLink(r.peer_id || r.from_id);
+      msg = `✏️ Отредактировано сообщение в диалоге с ${u}`;
       break;
     }
     case 'message_allow': {
@@ -116,8 +105,11 @@ async function handleVkEvent({ type, object }) {
       break;
     }
     case 'message_reaction_event': {
+      // Поля по официальной JSON-схеме VK (VKCOM/vk-api-schema, callback_message_reaction_event):
+      // reacted_id — кто поставил реакцию, peer_id, cmid — номер сообщения в диалоге, reaction_id.
+      // Раньше читался несуществующий reactor_id — ссылка вела на "ID undefined".
       const ev = object;
-      const u = await userLink(ev.reactor_id);
+      const u = await userLink(ev.reacted_id || ev.reactor_id || ev.peer_id);
       msg = `😀 ${u} отреагировал(а) на сообщение`;
       break;
     }
@@ -174,25 +166,25 @@ async function handleVkEvent({ type, object }) {
     case 'wall_reply_new': {
       const c = object;
       const u = await userLink(c.from_id);
-      const link = `https://vk.com/wall-${absOwner(c.owner_id)}_${c.post_id}?reply=${c.id}`;
+      const link = `https://vk.com/wall-${absOwner(c.post_owner_id || c.owner_id)}_${c.post_id}?reply=${c.id}`;
       msg = `💬 ${u} к <a href="${link}">комментарию</a>`;
       break;
     }
     case 'wall_reply_edit': {
       const c = object;
-      const link = `https://vk.com/wall-${absOwner(c.owner_id)}_${c.post_id}?reply=${c.id}`;
+      const link = `https://vk.com/wall-${absOwner(c.post_owner_id || c.owner_id)}_${c.post_id}?reply=${c.id}`;
       msg = `✏️ Комментарий: <a href="${link}">обновлён</a>`;
       break;
     }
     case 'wall_reply_delete': {
       const c = object;
-      const link = `https://vk.com/wall-${absOwner(c.owner_id)}_${c.post_id}`;
+      const link = `https://vk.com/wall-${absOwner(c.post_owner_id || c.owner_id)}_${c.post_id}`;
       msg = `🗑️ Удалён комментарий к <a href="${link}">посту</a>`;
       break;
     }
     case 'wall_reply_restore': {
       const c = object;
-      const link = `https://vk.com/wall-${absOwner(c.owner_id)}_${c.post_id}?reply=${c.id}`;
+      const link = `https://vk.com/wall-${absOwner(c.post_owner_id || c.owner_id)}_${c.post_id}?reply=${c.id}`;
       msg = `♻️ Восстановлен <a href="${link}">комментарий</a>`;
       break;
     }
@@ -228,19 +220,19 @@ async function handleVkEvent({ type, object }) {
     }
     case 'photo_comment_edit': {
       const c = object;
-      const link = `https://vk.com/photo-${absOwner(c.owner_id)}_${c.photo_id}?reply=${c.id}`;
+      const link = `https://vk.com/photo-${absOwner(c.photo_owner_id || c.owner_id)}_${c.photo_id}?reply=${c.id}`;
       msg = `✏️ Комментарий к <a href="${link}">фото</a>: обновлён`;
       break;
     }
     case 'photo_comment_delete': {
       const c = object;
-      const link = `https://vk.com/photo-${absOwner(c.owner_id)}_${c.photo_id}`;
+      const link = `https://vk.com/photo-${absOwner(c.photo_owner_id || c.owner_id)}_${c.photo_id}`;
       msg = `🗑️ Удалён комментарий к <a href="${link}">фото</a>`;
       break;
     }
     case 'photo_comment_restore': {
       const c = object;
-      const link = `https://vk.com/photo-${absOwner(c.owner_id)}_${c.photo_id}?reply=${c.id}`;
+      const link = `https://vk.com/photo-${absOwner(c.photo_owner_id || c.owner_id)}_${c.photo_id}?reply=${c.id}`;
       msg = `♻️ Восстановлен <a href="${link}">комментарий к фото</a>`;
       break;
     }
@@ -252,19 +244,19 @@ async function handleVkEvent({ type, object }) {
     }
     case 'video_comment_edit': {
       const c = object;
-      const link = `https://vk.com/video-${absOwner(c.owner_id)}_${c.video_id}?reply=${c.id}`;
+      const link = `https://vk.com/video-${absOwner(c.video_owner_id || c.owner_id)}_${c.video_id}?reply=${c.id}`;
       msg = `✏️ Комментарий к <a href="${link}">видео</a>: обновлён`;
       break;
     }
     case 'video_comment_delete': {
       const c = object;
-      const link = `https://vk.com/video-${absOwner(c.owner_id)}_${c.video_id}`;
+      const link = `https://vk.com/video-${absOwner(c.video_owner_id || c.owner_id)}_${c.video_id}`;
       msg = `🗑️ Удалён комментарий к <a href="${link}">видео</a>`;
       break;
     }
     case 'video_comment_restore': {
       const c = object;
-      const link = `https://vk.com/video-${absOwner(c.owner_id)}_${c.video_id}?reply=${c.id}`;
+      const link = `https://vk.com/video-${absOwner(c.video_owner_id || c.owner_id)}_${c.video_id}?reply=${c.id}`;
       msg = `♻️ Восстановлен <a href="${link}">комментарий к видео</a>`;
       break;
     }
@@ -282,6 +274,10 @@ async function handleVkEvent({ type, object }) {
       msg = `🗑️ Удалён комментарий к товару`;
       break;
     }
+    case 'market_comment_restore': {
+      msg = `♻️ Восстановлен комментарий к товару`;
+      break;
+    }
     case 'topic_comment_new': {
       const c = object;
       const u = await userLink(c.from_id);
@@ -291,22 +287,30 @@ async function handleVkEvent({ type, object }) {
     }
 
     /* ---------- Обсуждения (board) ---------- */
+    // Владелец обсуждения — topic_owner_id (dev.vk.com, «События в сообществах»); поля group_id в
+    // объекте комментария нет, раньше ссылка всегда строилась от VK_GROUP_ID.
     case 'board_post_new': {
       const ev = object;
       const u = ev.from_id ? await userLink(ev.from_id) : 'Кто-то';
-      const link = `https://vk.com/topic-${absOwner(ev.group_id || VK_GROUP_ID)}_${ev.topic_id || ev.post_id || ev.object_id}`;
+      const link = `https://vk.com/topic-${absOwner(ev.topic_owner_id || VK_GROUP_ID)}_${ev.topic_id}?post=${ev.id}`;
       msg = `📌 ${u} к <a href="${link}">записи в обсуждении</a>`;
       break;
     }
     case 'board_post_edit': {
       const ev = object;
-      const link = `https://vk.com/topic-${absOwner(ev.group_id || VK_GROUP_ID)}_${ev.topic_id}`;
+      const link = `https://vk.com/topic-${absOwner(ev.topic_owner_id || VK_GROUP_ID)}_${ev.topic_id}?post=${ev.id}`;
       msg = `✏️ Запись в <a href="${link}">обсуждении</a>: обновлена`;
+      break;
+    }
+    case 'board_post_restore': {
+      const ev = object;
+      const link = `https://vk.com/topic-${absOwner(ev.topic_owner_id || VK_GROUP_ID)}_${ev.topic_id}?post=${ev.id}`;
+      msg = `♻️ Восстановлена запись в <a href="${link}">обсуждении</a>`;
       break;
     }
     case 'board_post_delete': {
       const ev = object;
-      const link = `https://vk.com/topic-${absOwner(ev.group_id || VK_GROUP_ID)}_${ev.topic_id}`;
+      const link = `https://vk.com/topic-${absOwner(ev.topic_owner_id || VK_GROUP_ID)}_${ev.topic_id}`;
       msg = `🗑️ Удалена запись в <a href="${link}">обсуждении</a>`;
       break;
     }
@@ -326,15 +330,18 @@ async function handleVkEvent({ type, object }) {
 
     /* ---------- Группа / Подписки / Модерация ---------- */
     case 'group_join': {
+      // join_type: join | unsure | accepted | approved | request — request означает только
+      // заявку в закрытое сообщество, а не вступление.
       const ev = object;
       const u = await userLink(ev.user_id);
-      msg = `🟢 ${u} вступил(а)`;
+      msg = ev.join_type === 'request' ? `📨 ${u} подал(а) заявку на вступление` : `🟢 ${u} вступил(а)`;
       break;
     }
     case 'group_leave': {
+      // self: 1 — вышел сам, 0 — удалён руководителем.
       const ev = object;
       const u = await userLink(ev.user_id);
-      msg = `🔴 ${u} вышел(а)`;
+      msg = ev.self === 0 ? `🔴 ${u} удалён(а) из сообщества` : `🔴 ${u} вышел(а)`;
       // дубль в лид-чат
       await notifyLEAD(`🔴 ${u} вышел(а) из <a href="${groupLink()}">сообщества</a>`);
       break;
@@ -386,7 +393,57 @@ async function handleVkEvent({ type, object }) {
     case 'vkpay_transaction': {
       const ev = object;
       const u = ev.from_id ? await userLink(ev.from_id) : 'Пользователь';
-      msg = `💳 VK Pay: ${u}`;
+      // amount — в тысячных долях рубля (dev.vk.com, «События в сообществах»).
+      const sum = typeof ev.amount === 'number' ? ` — ${(ev.amount / 1000).toLocaleString('ru-RU')} ₽` : '';
+      msg = `💳 VK Pay: ${u}${sum}`;
+      break;
+    }
+
+    /* ---------- Отложенные записи ---------- */
+    case 'wall_schedule_post_new':
+    case 'wall_schedule_post_delete': {
+      const ev = object;
+      const when = ev.schedule_time
+        ? new Date(ev.schedule_time * 1000).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК'
+        : 'неизвестно';
+      msg = type === 'wall_schedule_post_new'
+        ? `🗓️ Запланирована запись на ${when}`
+        : `🗓️ Удалена отложенная запись (была на ${when})`;
+      break;
+    }
+
+    /* ---------- VK Донат ---------- */
+    case 'donut_subscription_create':
+    case 'donut_subscription_prolonged': {
+      const ev = object;
+      const u = ev.user_id ? await userLink(ev.user_id) : 'Пользователь';
+      const verb = type === 'donut_subscription_create' ? 'оформил(а)' : 'продлил(а)';
+      msg = `💰 ${u} ${verb} VK Донат${typeof ev.amount === 'number' ? ` — ${ev.amount} ₽` : ''}`;
+      break;
+    }
+    case 'donut_subscription_expired':
+    case 'donut_subscription_cancelled': {
+      const ev = object;
+      const u = ev.user_id ? await userLink(ev.user_id) : 'Пользователь';
+      msg = type === 'donut_subscription_expired'
+        ? `💰 У ${u} истекла подписка VK Донат`
+        : `💰 ${u} отменил(а) подписку VK Донат`;
+      break;
+    }
+    case 'donut_subscription_price_changed': {
+      const ev = object;
+      const u = ev.user_id ? await userLink(ev.user_id) : 'Пользователь';
+      msg = `💰 ${u}: цена подписки VK Донат ${ev.amount_old} → ${ev.amount_new} ₽`;
+      break;
+    }
+    case 'donut_money_withdraw': {
+      const ev = object;
+      msg = `💰 Вывод средств VK Донат${typeof ev.amount === 'number' ? `: ${ev.amount} ₽` : ''}`;
+      break;
+    }
+    case 'donut_money_withdraw_error': {
+      const ev = object;
+      msg = `⚠️ Ошибка вывода средств VK Донат${ev.reason ? `: ${escapeHtml(ev.reason)}` : ''}`;
       break;
     }
 

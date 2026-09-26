@@ -80,6 +80,11 @@ function toLikesApiType(objectType) {
     case 'market_comment':
     case 'sitepage':
       return t;
+    // Клип в VK — это видеозапись (clip-X_Y и video-X_Y открывают один объект), а отдельного типа
+    // clip у likes.getList нет (dev.vk.com/ru/method/likes.getList). Не проверено на реальном
+    // ключе: если VK ответит ошибкой, tryGetLikesCount залогирует её и счётчика просто не будет.
+    case 'clip':
+      return 'video';
     default:
       return null;
   }

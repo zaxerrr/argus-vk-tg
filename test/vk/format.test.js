@@ -33,5 +33,9 @@ test('buildObjectLink builds correct VK deep links per object type', () => {
 test('toLikesApiType allow-lists only types supported by likes.getList', () => {
   assert.equal(toLikesApiType('post'), 'post');
   assert.equal(toLikesApiType('PHOTO_COMMENT'), 'photo_comment');
-  assert.equal(toLikesApiType('clip'), null);
+  assert.equal(toLikesApiType('story'), null);
+});
+
+test('toLikesApiType maps clip to video (clips are videos in VK, likes.getList has no clip type)', () => {
+  assert.equal(toLikesApiType('clip'), 'video');
 });

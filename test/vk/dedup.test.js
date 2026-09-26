@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildKey, shouldProcessEvent, rememberEvent, isMirroredLike } = require('../../src/vk/dedup');
+const { buildKey, dedupKeys, shouldProcessEvent, rememberEvent, isMirroredLike } = require('../../src/vk/dedup');
 
 test('same input yields same key', () => {
   const ctx = {
@@ -218,4 +218,42 @@ test('isMirroredLike: two different posts, or different likers, are not mirrors'
   assert.equal(isMirroredLike(p2), false);
   assert.equal(isMirroredLike(clipOther), false);
   assert.equal(isMirroredLike(photo), false);
+});
+
+test('event_id: a VK retry with the same event_id is a duplicate', async () => {
+  const ctx = { type: 'group_join', event_id: 'ev-retry-1', group_id: 1, object: { user_id: 7001, join_type: 'join' } };
+  assert.equal(await shouldProcessEvent(ctx), true);
+  rememberEvent(ctx);
+  assert.equal(await shouldProcessEvent({ ...ctx, object: { ...ctx.object } }), false);
+});
+
+test('event_id: the same action repeated later (new event_id) is NOT a duplicate once the short content window passed', async () => {
+  // Имитация: первое вступление было давно — в памяти его контентного ключа уже нет (новый процесс),
+  // а основной ключ (event_id) другой. Раньше контентный ключ жил сутки в Firestore и глотал
+  // повторное вступление того же человека.
+  const first = { type: 'group_join', event_id: 'ev-join-a', group_id: 1, object: { user_id: 7002, join_type: 'join' } };
+  const again = { type: 'group_join', event_id: 'ev-join-b', group_id: 1, object: { user_id: 7002, join_type: 'join' } };
+  const db = createFakeDb(new Map([[dedupKeys(first).primary, { ts: 'x' }]]));
+  assert.equal(await shouldProcessEvent(again, db), true);
+});
+
+test('event_id: near-simultaneous duplicate with a different event_id is caught by the content window', async () => {
+  const a = { type: 'like_add', event_id: 'ev-dup-a', group_id: 1, object: { liker_id: 7003, object_type: 'post', object_id: 5, object_owner_id: -1 } };
+  const b = { ...a, event_id: 'ev-dup-b' };
+  assert.equal(await shouldProcessEvent(a), true);
+  assert.equal(await shouldProcessEvent(b), false);
+});
+
+test('like on two different comments of the same post yields different keys (object_id before post_id)', () => {
+  const c1 = { type: 'like_add', object: { liker_id: 1, object_type: 'comment', object_id: 100, post_id: 1521, object_owner_id: -1 } };
+  const c2 = { type: 'like_add', object: { liker_id: 1, object_type: 'comment', object_id: 101, post_id: 1521, object_owner_id: -1 } };
+  assert.notEqual(buildKey(c1), buildKey(c2));
+});
+
+test('message_reaction_event keys use the official fields (reacted_id, cmid)', () => {
+  const r1 = { type: 'message_reaction_event', object: { reacted_id: 1, peer_id: 1, cmid: 10, reaction_id: 1 } };
+  const r2 = { type: 'message_reaction_event', object: { reacted_id: 1, peer_id: 1, cmid: 11, reaction_id: 1 } };
+  const r3 = { type: 'message_reaction_event', object: { reacted_id: 2, peer_id: 2, cmid: 10, reaction_id: 1 } };
+  assert.notEqual(buildKey(r1), buildKey(r2));
+  assert.notEqual(buildKey(r1), buildKey(r3));
 });

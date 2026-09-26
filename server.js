@@ -20,10 +20,10 @@ const { handleVkEvent } = require('./src/vk/events');
 const { loadPersistedState } = require('./src/state');
 const { createRateLimiter } = require('./src/security/rateLimit');
 const { getOverview24h, getTopVkEventTypes, formatDigest } = require('./src/lib/stats');
-const { checkVkServiceKey } = require('./src/utils');
+const { checkVkServiceKey, escapeHtml } = require('./src/utils');
 
 // Логгер Firestore
-const { withRequestId, logMiddlewareVK, logger, logError } = require('./src/lib/logger');
+const { withRequestId, logIncomingVK, logger, logError } = require('./src/lib/logger');
 const { db } = require('./src/lib/db');
 
 const app = express();
@@ -51,32 +51,54 @@ if (STATS_DIGEST_HOURS) {
   }, intervalMs).unref();
 }
 
-// Проверка состояния
+// Проверка состояния. Render сам дёргает healthCheckPath «каждые несколько секунд» (render.com/docs/
+// health-checks) — раньше каждый вызов стоил чтения Firestore, т.е. тысячи чтений в сутки из
+// бесплатных 50 000 только на health checks. Результат пинга Firestore кэшируется на минуту.
+// Всегда 200: при 4xx/5xx дольше 60 с Render перезапускает инстанс, а недоступный Firestore —
+// не повод перезапускать бота (события и команды без него работают).
+const FIRESTORE_PING_TTL_MS = 60_000;
+let firestorePing = { ok: false, at: 0 };
+
 app.get('/health', async (req, res) => {
   const up = Math.floor((Date.now() - (global.__BOT_STARTED_AT?.getTime() || Date.now())) / 1000);
 
-  let firestoreOk = false;
-  try {
-    const ping = db.collection('bot_logs').limit(1).get();
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
-    await Promise.race([ping, timeout]);
-    firestoreOk = true;
-  } catch (_) {
-    firestoreOk = false;
+  if (Date.now() - firestorePing.at > FIRESTORE_PING_TTL_MS) {
+    let ok = false;
+    try {
+      const ping = db.collection('bot_logs').limit(1).get();
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
+      await Promise.race([ping, timeout]);
+      ok = true;
+    } catch (_) {
+      ok = false;
+    }
+    firestorePing = { ok, at: Date.now() };
   }
 
-  res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString(), firestore: firestoreOk });
+  res.status(200).json({ ok: true, uptime_sec: up, ts: new Date().toISOString(), firestore: firestorePing.ok });
 });
 
 // Вебхук VK
-const webhookRateLimit = createRateLimiter({ windowMs: 60_000, max: 120 });
+//
+// Rate limit применяется только к запросам с НЕВЕРНЫМ секретом. За прокси Render (Cloudflare +
+// балансировщик) req.ip без trust proxy — адрес прокси, один на всех: общий лимит 120/мин мог
+// бы выбрать флудер, и тогда VK получал бы 429 на настоящие события. А по документации VK
+// (dev.vk.com, Callback API): «если сервер несколько раз подряд вернёт ошибку, Callback API
+// временно перестанет отправлять на него уведомления». Аутентифицированный VK не ограничиваем.
+const badSecretRateLimit = createRateLimiter({ windowMs: 60_000, max: 120 });
 
-app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
-  const { type, object, group_id, secret } = req.body || {};
-  // Логируем сам факт запроса ДО проверки секрета — иначе отказ по секрету (опечатка/смена
-  // VK_SECRET_KEY при переключении на другую группу) не оставляет в логах ни следа, и "пустые
-  // логи" неотличимы от "VK вообще не стучится на вебхук".
-  console.log(`[${new Date().toISOString()}] VK запрос: type=${type || '?'} group_id=${group_id || '?'}`);
+// Одно предупреждение в debug-роль за запуск, если события приходят от чужого сообщества.
+let foreignGroupWarned = false;
+const EXPECTED_GROUP_ID = Math.abs(Number(VK_GROUP_ID));
+
+app.post('/webhook', async (req, res) => {
+  const { type, object, group_id, secret, event_id } = req.body || {};
+  // X-Retry-Counter — число неудачных попыток доставки этого события (VK повторяет через 10 с,
+  // 3 мин, 10 мин, 30 мин, 1 ч). Повтор на Render free почти всегда значит «инстанс спал».
+  const retry = req.get('X-Retry-Counter');
+  // Логируем сам факт запроса ДО проверки секрета — иначе отказ по секрету не оставляет в логах
+  // ни следа, и "пустые логи" неотличимы от "VK вообще не стучится на вебхук".
+  console.log(`[${new Date().toISOString()}] VK запрос: type=${type || '?'} group_id=${group_id || '?'}${retry ? ` retry=${retry}` : ''}`);
 
   // Проверка секрета (timing-safe, чтобы не давать утечку через разницу во времени сравнения)
   const provided = Buffer.from(String(secret || ''));
@@ -84,8 +106,10 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
   const secretOk = provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
   if (!secretOk) {
     console.warn(`[${new Date().toISOString()}] VK secret не совпал — запрос отклонён (403)`);
-    return res.status(403).send('Forbidden');
+    return badSecretRateLimit(req, res, () => res.status(403).send('Forbidden'));
   }
+
+  logIncomingVK(req);
 
   // Подтверждение сервера VK: нужно вернуть РОВНО строку из настроек Callback API
   // (не "ok") — иначе VK не активирует Callback API для нового сообщества.
@@ -101,17 +125,31 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
     return res.send('ok');
   }
 
+  // Событие другого сообщества (тот же URL и секрет подключены ещё к одной группе, или
+  // VK_GROUP_ID не обновлён после переключения на новую группу). Отвечаем "ok" — иначе VK будет
+  // повторять и в итоге приостановит отправку, — но не пересылаем: ссылки строятся от VK_GROUP_ID.
+  if (Number.isFinite(EXPECTED_GROUP_ID) && Number(group_id) !== EXPECTED_GROUP_ID) {
+    console.warn(`[${new Date().toISOString()}] VK событие от group_id=${group_id}, ожидается ${EXPECTED_GROUP_ID} — пропуск`);
+    logger.warn({ source: 'vk', event: 'foreign_group', request_id: req.requestId, summary: `group_id=${group_id}`, payload: { type } });
+    if (!foreignGroupWarned) {
+      foreignGroupWarned = true;
+      sendToRole('debug', `⚠️ Пришло событие VK от сообщества ${escapeHtml(group_id)}, а VK_GROUP_ID=${EXPECTED_GROUP_ID}. Такие события пропускаются — проверьте VK_GROUP_ID в Render.`).catch(() => {});
+    }
+    return res.send('ok');
+  }
+
   // Быстрое подтверждение, чтобы VK не ретраил
   res.send('ok');
 
   try {
     // Дедуп — сначала дешёвая проверка в памяти, затем (если её недостаточно) в Firestore,
     // переживающем рестарт процесса. См. комментарий в src/vk/dedup.js.
-    if (!(await shouldProcessEvent({ type, object, group_id }, db))) {
+    const ctx = { type, object, group_id, event_id };
+    if (!(await shouldProcessEvent(ctx, db))) {
       console.log('Дубликат — пропуск.');
       return;
     }
-    rememberEvent({ type, object, group_id }, db);
+    rememberEvent(ctx, db);
     if (isMirroredLike({ type, object, group_id })) {
       console.log('Зеркальный лайк клип↔пост — пропуск.');
       return;
@@ -163,13 +201,18 @@ let server;
 
     // Проверка VK_SERVICE_KEY при старте — без этого невалидный/просроченный ключ был виден
     // только косвенно, через молча пропадающие счётчики лайков (см. src/utils.js).
-    const vkKeyCheck = await checkVkServiceKey(VK_GROUP_ID).catch(e => ({ ok: false, error: e.message }));
-    if (vkKeyCheck.ok) {
-      lines.push('VK_SERVICE_KEY: ✅ OK');
+    // Проверяется сам likes.getList — см. checkVkServiceKey в src/utils.js.
+    const vkKeyCheck = await checkVkServiceKey(VK_GROUP_ID).catch(e => ({ ok: false, likesOk: false, error: e.message }));
+    if (!vkKeyCheck.ok) {
+      lines.push(`VK_SERVICE_KEY: ❌ ${escapeHtml(vkKeyCheck.error)}`);
+    } else if (vkKeyCheck.likesOk === true) {
+      lines.push('VK_SERVICE_KEY: ✅ OK, счётчики лайков работают');
+    } else if (vkKeyCheck.likesOk === false) {
+      lines.push(`VK_SERVICE_KEY: ⚠️ ключ валиден, но счётчиков лайков не будет — ${escapeHtml(vkKeyCheck.error)}`);
     } else {
-      lines.push(`VK_SERVICE_KEY: ❌ ${vkKeyCheck.error}`);
-      console.warn('[boot] VK_SERVICE_KEY не прошёл проверку:', vkKeyCheck.error);
+      lines.push(`VK_SERVICE_KEY: ✅ ключ валиден (likes.getList не проверен: ${escapeHtml(vkKeyCheck.error)})`);
     }
+    if (vkKeyCheck.likesOk !== true) console.warn('[boot] Проверка VK_SERVICE_KEY:', vkKeyCheck.error);
 
     await sendToRole('debug', lines.join('\n'), { parse_mode: 'HTML', disable_web_page_preview: true });
   });

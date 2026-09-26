@@ -28,6 +28,7 @@ structured logging and runtime-configurable event filtering.
 
 More detail: [`CLAUDE.md`](./CLAUDE.md) (request flow, code layout),
 [`docs/VK_API.md`](./docs/VK_API.md) (API version, confirmation, access tokens, event map),
+[`docs/RENDER.md`](./docs/RENDER.md) (Render free tier: sleep, deploys, health checks, keep-alive),
 [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) (Firebase project setup).
 
 ### Setup
@@ -39,28 +40,33 @@ More detail: [`CLAUDE.md`](./CLAUDE.md) (request flow, code layout),
 3. Firebase (free Spark plan is enough) — see [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md):
    create a project, enable Firestore (Native mode), put the service-account key JSON into
    `FIREBASE_SERVICE_ACCOUNT`, and check `FIREBASE_FIRESTORE_DATABASE_ID`. No migrations.
-4. **`VK_SERVICE_KEY` must be a VK *user* access token (`vk1.a...`), not a community access key.**
-   VK blocks the `likes.*` methods for community keys, so like counters silently won't work with
-   one. How to obtain a user token: [`docs/VK_API.md`](./docs/VK_API.md).
+4. **`VK_SERVICE_KEY` must be an app *service key* (recommended, never expires) or a user token —
+   not a community access key.** VK blocks `likes.*` for community keys (error 27), so like
+   counters silently won't work with one. New user tokens via `oauth.vk.com` implicit flow are no
+   longer issued (disabled since June 2024). How to get a service key: [`docs/VK_API.md`](./docs/VK_API.md).
 5. VK community → Manage → API usage → Callback API: server URL `https://<your-host>/webhook`, the
    secret key = `VK_SECRET_KEY` (a string you make up), copy the confirmation string into
    `VK_CONFIRMATION_CODE`, and **tick the event types** you want on the "Event types" tab —
    confirmation alone doesn't subscribe to anything.
-6. `npm start`. The startup message (debug role) reports `VK_SERVICE_KEY: ✅ OK` or the VK error.
+6. `npm start`. The startup message (debug role) checks `likes.getList` with the key and reports
+   `VK_SERVICE_KEY: ✅ OK, счётчики лайков работают`, a ⚠️ warning (e.g. error 27) or the VK error.
 
 ### Deploying
 
 [`render.yaml`](./render.yaml) is a [Render](https://render.com) Blueprint (free tier): Render
 dashboard → New → Blueprint → pick this repo, then fill in the prompted env vars. The free plan
-sleeps after ~15 minutes without inbound HTTP traffic, which also stops the Telegram long-polling
-loop — see the comment in `render.yaml` for the trade-off and a keep-alive workaround. Any Node.js
-18+ host works, as long as it runs `npm start` and passes its own `PORT`.
+sleeps after 15 minutes without **inbound** traffic; Telegram long-polling is outbound, so while
+asleep the bot doesn't answer commands. Wake-up takes ~1 minute, and there are 750 free hours per
+month per workspace. See [`docs/RENDER.md`](./docs/RENDER.md) for the consequences and a
+keep-alive setup. After changing an env var on Render, **deploy** — a restart doesn't pick up
+changes. Node.js is pinned to 22.x (`engines`); any Node 22 host that runs `npm start` and passes
+its own `PORT` works.
 
 ### Telegram commands
 
 | Command | Access | What it does |
 |---|---|---|
-| `/help` | all | List commands |
+| `/help`, `/start` | all | List commands |
 | `/status`, `/ping`, `/version` | all | Liveness, latency, version + uptime |
 | `/my_chat_id`, `/whoami`, `/topic_id` | all | Chat ID, your user ID/admin flag, current topic's thread ID |
 | `/topics` | admin | Resolved chat + topic per role |
@@ -70,6 +76,9 @@ loop — see the comment in `render.yaml` for the trade-off and a keep-alive wor
 | `/test_notification` | admin | Test message to the debug chat |
 | `/stats` | admin | Today's (UTC) activity by event type |
 | `/raw_event [type]` | admin | Raw JSON of the latest VK event from `bot_logs` (for unknown types) |
+
+Commands work both as `/help` and as `/help@YourBot` (what Telegram inserts from the `/` menu in
+groups); commands addressed to other bots are ignored.
 
 ### Forum topics
 
@@ -91,17 +100,20 @@ repeated deliveries aren't double-counted. Set `STATS_DIGEST_HOURS` to post it a
 
 | Symptom | Likely cause |
 |---|---|
-| Like notifications without "(Всего: N)" | `VK_SERVICE_KEY` is a community key — use a user token |
+| Like notifications without "(Всего: N)" | `VK_SERVICE_KEY` is a community key — use an app service key; the startup message says so |
+| Commands answered minutes late, or in bursts | The Render free instance was asleep — see `docs/RENDER.md` (keep-alive) |
+| `retry=N` in `VK запрос` log lines | VK re-delivered because the instance was waking up; duplicates are dropped by `event_id` |
+| Startup ⚠️ "Пришло событие VK от сообщества …" | Events from a group other than `VK_GROUP_ID` — they're skipped |
 | No startup message, `message thread not found` in logs | A topic is bound to a role whose chat doesn't have it (e.g. a private chat) — `/set_topic <role> off` |
 | Render logs show nothing when things happen in VK | Event types not ticked in the community's Callback API settings |
 | `VK secret не совпал — запрос отклонён (403)` in logs | `VK_SECRET_KEY` differs from the Callback API secret |
-| `409 Conflict ... getUpdates` | Two bot instances on one token (brief overlap during a redeploy is normal) |
+| `409 Conflict` warning | Two bot instances on one token; for 1–2 min after a Render deploy it's expected (old instance gets SIGTERM 60 s after the new one is up) |
 | Event shown as `❓ <type>` | New VK event type — grab its payload with `/raw_event <type>` and add a handler |
 
 ### Health check
 
-`GET /health` returns `{ ok, uptime_sec, ts, firestore }`; `firestore` is a live 2s-timeout check
-against `bot_logs`.
+`GET /health` always returns 200 with `{ ok, uptime_sec, ts, firestore }`; `firestore` is a
+2s-timeout read of `bot_logs`, cached for 60 s (Render polls the health check every few seconds).
 
 ### Known limitations
 
@@ -109,8 +121,10 @@ against `bot_logs`.
 - `handlers/`, `utils/index.js`, `src/lib/events.js`, `src/storage/*` are unwired legacy code;
   `src/worker.js` / `wrangler.jsonc` are an unfinished Cloudflare Worker stub. See `CLAUDE.md`.
 - `/stats` is a calendar-day counter (resets at UTC midnight), not a rolling 24h window.
-- Likes on clips get no counter: `toLikesApiType()` doesn't request one for the `clip` type (same
-  as the older solution this fork came from).
+- A like on a clip published inside a post arrives from VK twice (clip + post); only the first
+  one is sent. Clip counters are requested as `video` (clips are videos in VK) — not yet verified
+  against a real key.
+- While the Render free instance sleeps, commands aren't processed (see `docs/RENDER.md`).
 
 ---
 
@@ -134,6 +148,7 @@ against `bot_logs`.
 
 Подробнее: [`CLAUDE.md`](./CLAUDE.md) (поток запроса, структура кода),
 [`docs/VK_API.md`](./docs/VK_API.md) (версия API, подтверждение, токены доступа, карта событий),
+[`docs/RENDER.md`](./docs/RENDER.md) (бесплатный Render: сон, деплой, health checks, keep-alive),
 [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md) (настройка Firebase).
 
 ### Установка
@@ -145,29 +160,35 @@ against `bot_logs`.
 3. Firebase (хватает бесплатного Spark) — см. [`docs/FIREBASE_SETUP.md`](./docs/FIREBASE_SETUP.md):
    создать проект, включить Firestore (Native mode), вставить JSON ключа сервисного аккаунта в
    `FIREBASE_SERVICE_ACCOUNT`, проверить `FIREBASE_FIRESTORE_DATABASE_ID`. Миграций нет.
-4. **`VK_SERVICE_KEY` — это пользовательский токен VK (`vk1.a...`), а не ключ доступа
-   сообщества.** VK не пускает ключи сообщества к методам `likes.*`, и счётчики лайков с таким
-   ключом молча не работают. Как получить пользовательский токен —
-   [`docs/VK_API.md`](./docs/VK_API.md).
+4. **`VK_SERVICE_KEY` — сервисный ключ приложения (рекомендуется, бессрочный) или
+   пользовательский токен, но не ключ доступа сообщества.** VK не пускает ключи сообщества к
+   методам `likes.*` (ошибка 27), и счётчики лайков с таким ключом молча не работают. Новые
+   пользовательские токены через `oauth.vk.com` (Implicit Flow) VK больше не выдаёт — отключено с
+   июня 2024. Как получить сервисный ключ — [`docs/VK_API.md`](./docs/VK_API.md).
 5. Сообщество VK → Управление → Работа с API → Callback API: адрес `https://<ваш-хост>/webhook`,
    секретный ключ = `VK_SECRET_KEY` (строка, которую придумываете сами), строку подтверждения —
    в `VK_CONFIRMATION_CODE`, и **отметьте нужные типы событий** на вкладке «Типы событий» —
    одно подтверждение ни на что не подписывает.
-6. `npm start`. Стартовое сообщение (роль debug) покажет `VK_SERVICE_KEY: ✅ OK` или ошибку VK.
+6. `npm start`. Стартовое сообщение (роль debug) проверяет ключом `likes.getList` и покажет
+   `VK_SERVICE_KEY: ✅ OK, счётчики лайков работают`, предупреждение ⚠️ (например, ошибка 27) или
+   ошибку VK.
 
 ### Деплой
 
 [`render.yaml`](./render.yaml) — Blueprint для [Render](https://render.com) (бесплатный тариф):
 дашборд Render → New → Blueprint → выбрать репозиторий, заполнить запрошенные переменные. На
-бесплатном тарифе сервис засыпает примерно через 15 минут без входящих HTTP-запросов, и вместе с
-ним останавливается long-polling бота — компромисс и обход (keep-alive) описаны в `render.yaml`.
-Подойдёт любой хостинг с Node.js 18+, который запускает `npm start` и передаёт свой `PORT`.
+бесплатном тарифе сервис засыпает через 15 минут без **входящего** трафика. Long-polling Telegram —
+исходящий трафик, поэтому пока сервис спит, бот не отвечает на команды. Пробуждение занимает около
+минуты, бесплатных часов — 750 в месяц на весь workspace. Последствия и настройка keep-alive —
+в [`docs/RENDER.md`](./docs/RENDER.md). После смены переменной в Render нужен **деплой**: рестарт
+изменения не подхватывает. Node.js закреплён на 22.x (`engines`); подойдёт любой хостинг с Node 22,
+который запускает `npm start` и передаёт свой `PORT`.
 
 ### Команды Telegram
 
 | Команда | Доступ | Что делает |
 |---|---|---|
-| `/help` | все | Список команд |
+| `/help`, `/start` | все | Список команд |
 | `/status`, `/ping`, `/version` | все | Жив ли бот, задержка, версия и аптайм |
 | `/my_chat_id`, `/whoami`, `/topic_id` | все | ID чата, твой ID и признак админа, ID текущей темы |
 | `/topics` | админ | Итоговый чат + тема по каждой роли |
@@ -177,6 +198,9 @@ against `bot_logs`.
 | `/test_notification` | админ | Тестовое сообщение в debug |
 | `/stats` | админ | Активность за сегодня (UTC) по типам событий |
 | `/raw_event [тип]` | админ | Сырой JSON последнего VK-события из `bot_logs` (для незнакомых типов) |
+
+Команды работают и как `/help`, и как `/help@ИмяБота` — в группах Telegram так подставляет команду
+из меню `/`. Команды, адресованные другим ботам, игнорируются.
 
 ### Темы форума
 
@@ -198,17 +222,21 @@ against `bot_logs`.
 
 | Симптом | Вероятная причина |
 |---|---|
-| Уведомления о лайках без «(Всего: N)» | В `VK_SERVICE_KEY` ключ сообщества — нужен пользовательский токен |
+| Уведомления о лайках без «(Всего: N)» | В `VK_SERVICE_KEY` ключ сообщества — нужен сервисный ключ приложения; стартовое сообщение это покажет |
+| Команды отвечают с опозданием на минуты или пачкой | Инстанс Render free спал — см. `docs/RENDER.md` (keep-alive) |
+| В логах `VK запрос: … retry=N` | VK повторил доставку, пока инстанс просыпался; дубли отсекаются по `event_id` |
+| ⚠️ «Пришло событие VK от сообщества …» | События от группы, отличной от `VK_GROUP_ID`, — они пропускаются |
 | Нет стартового сообщения, в логах `message thread not found` | К роли привязана тема, которой нет в её чате (например, в личке) — `/set_topic <роль> off` |
 | В VK события есть, а в логах Render пусто | Не отмечены типы событий в настройках Callback API сообщества |
 | В логах `VK secret не совпал — запрос отклонён (403)` | `VK_SECRET_KEY` не совпадает с секретом Callback API |
-| `409 Conflict ... getUpdates` | Два инстанса на одном токене (кратко при редеплое — норма) |
+| Предупреждение `409 Conflict` | Два инстанса на одном токене; 1–2 мин после деплоя на Render — норма (старый инстанс гасится через 60 с после старта нового) |
 | Событие пришло как `❓ <тип>` | Новый тип события VK — достаньте payload через `/raw_event <тип>` и добавьте обработчик |
 
 ### Health-check
 
-`GET /health` возвращает `{ ok, uptime_sec, ts, firestore }`; `firestore` — живая проверка связи с
-`bot_logs` (таймаут 2с).
+`GET /health` всегда отвечает 200 и `{ ok, uptime_sec, ts, firestore }`; `firestore` — чтение из
+`bot_logs` с таймаутом 2 с, результат кэшируется на 60 с (Render дёргает health check каждые
+несколько секунд).
 
 ### Известные ограничения
 
@@ -216,5 +244,7 @@ against `bot_logs`.
 - `handlers/`, `utils/index.js`, `src/lib/events.js`, `src/storage/*` — неподключённый старый код;
   `src/worker.js` / `wrangler.jsonc` — незавершённая заготовка Cloudflare Worker. См. `CLAUDE.md`.
 - `/stats` — счётчик за календарные сутки (обнуляется в полночь UTC), а не скользящее окно 24ч.
-- У лайков на клипы счётчика нет: `toLikesApiType()` не запрашивает его для типа `clip` (так же,
-  как в исходном решении).
+- Лайк клипа, опубликованного в посте, VK присылает дважды (клип + пост) — в чат уходит только
+  первое. Счётчик для клипа запрашивается как для `video` (клип в VK — видеозапись); на реальном
+  ключе ещё не проверено.
+- Пока инстанс Render free спит, команды не обрабатываются (см. `docs/RENDER.md`).

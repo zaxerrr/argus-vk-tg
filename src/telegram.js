@@ -16,6 +16,24 @@ bot.on('message', msg => {
   try { require('./lib/logger').logIncomingTelegram(msg); } catch (_) {}
 });
 
+// 409 Conflict — этот токен одновременно опрашивает ещё один процесс. На Render это ожидаемо
+// после каждого деплоя: старый инстанс получает SIGTERM только через 60 с после того, как новый
+// стал healthy (render.com/docs/deploys, zero-downtime deploys), и всё это время оба делают
+// getUpdates. Без обработчика библиотека печатала стек на каждую попытку. Если 409 держится
+// дольше пары минут — тот же токен запущен где-то ещё (локально, второй сервис).
+let lastConflictLogAt = 0;
+bot.on('polling_error', err => {
+  const code = err && err.response && err.response.body && err.response.body.error_code;
+  if (code === 409) {
+    if (Date.now() - lastConflictLogAt > 60_000) {
+      lastConflictLogAt = Date.now();
+      console.warn('[telegram] 409 Conflict: этот токен опрашивает ещё один экземпляр бота. Норма на 1–2 мин после деплоя на Render; дольше — ищите второй запуск с тем же TELEGRAM_BOT_TOKEN.');
+    }
+    return;
+  }
+  console.error('[telegram] polling_error:', err && err.code, err && err.message);
+});
+
 // Отдельный чат на роль (старый способ — несколько чатов). "main" всегда — основной чат.
 const ROLE_CHAT_ENV = { lead: LEAD_CHAT_ID, debug: DEBUG_CHAT_ID, stats: STATS_CHAT_ID };
 

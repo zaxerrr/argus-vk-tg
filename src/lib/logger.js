@@ -5,6 +5,8 @@
 const { db } = require('./db');
 const { randomUUID } = require('crypto');
 
+const LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 суток — см. expireAt ниже
+
 /** @typedef {'debug'|'info'|'warn'|'error'} Level */
 /** @typedef {'in'|'out'|'none'} Direction */
 
@@ -73,6 +75,10 @@ class FirestoreLogger {
           summary: r.summary || null,
           payload: r.payload ?? null,
           error: r.error || null,
+          // Timestamp для TTL-политики Firestore (ts — строка, TTL её не понимает). Без политики
+          // поле ни на что не влияет; с ней bot_logs перестаёт расти бесконечно (там тексты
+          // сообщений пользователей). См. docs/FIREBASE_SETUP.md.
+          expireAt: new Date(Date.now() + LOG_RETENTION_MS),
         });
       }
       await batch.commit();
@@ -112,26 +118,27 @@ function logIncomingTelegram (msg) {
   });
 }
 
-function logMiddlewareVK () {
-  return (req, _res, next) => {
-    // Поле secret — это VK_SECRET_KEY: не пишем его в bot_logs (оттуда payload читает /raw_event
-    // и выводит в Telegram).
-    const { secret: _secret, ...body } = req.body || {};
-    const obj  = body?.object || {};
-    const peer = obj?.peer_id || obj?.message?.peer_id || obj?.chat_id;
-    const from = obj?.from_id || obj?.message?.from_id;
-    logger.info({
-      source: 'vk',
-      event: 'incoming_update',
-      request_id: req.requestId,
-      direction: 'in',
-      chat_id: peer ? String(peer) : undefined,
-      user_id: from ? String(from) : undefined,
-      summary: (obj && obj.message && obj.message.text) || body?.type || 'vk_event',
-      payload: body,
-    });
-    next();
-  };
+// Входящий вебхук VK. Вызывается из server.js ПОСЛЕ проверки секрета: раньше это был middleware
+// перед проверкой, и каждый запрос с неверным секретом (флуд, сканеры) стоил записи в bot_logs —
+// квота бесплатного Firestore 20 000 записей/сутки, а rate limiter за прокси Render видел один IP
+// на всех. Заодно неаутентифицированные payload больше не попадают в /raw_event.
+function logIncomingVK (req) {
+  // Поле secret — это VK_SECRET_KEY: не пишем его в bot_logs (оттуда payload читает /raw_event
+  // и выводит в Telegram).
+  const { secret: _secret, ...body } = req.body || {};
+  const obj  = body?.object || {};
+  const peer = obj?.peer_id || obj?.message?.peer_id || obj?.chat_id;
+  const from = obj?.from_id || obj?.message?.from_id;
+  logger.info({
+    source: 'vk',
+    event: 'incoming_update',
+    request_id: req.requestId,
+    direction: 'in',
+    chat_id: peer ? String(peer) : undefined,
+    user_id: from ? String(from) : undefined,
+    summary: (obj && obj.message && obj.message.text) || body?.type || 'vk_event',
+    payload: body,
+  });
 }
 
 // Хелперы для исходящих сообщений и ошибок
@@ -164,7 +171,7 @@ module.exports = {
   logger,
   withRequestId,
   logIncomingTelegram,
-  logMiddlewareVK,
+  logIncomingVK,
   logOutgoingMessage,
   logError,
 };

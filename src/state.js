@@ -42,6 +42,8 @@ const state = {
     wall_reply_edit: true,
     wall_reply_delete: true,
     wall_reply_restore: true,
+    wall_schedule_post_new: true,
+    wall_schedule_post_delete: true,
 
     // Фото
     photo_new: true,
@@ -64,6 +66,7 @@ const state = {
     board_post_new: true,
     board_post_edit: true,
     board_post_delete: true,
+    board_post_restore: true,
 
     // Маркет
     market_order_new: true,
@@ -71,6 +74,7 @@ const state = {
     market_comment_new: true,
     market_comment_edit: true,
     market_comment_delete: true,
+    market_comment_restore: true,
 
     // Опросы
     poll_vote_new: true,
@@ -93,7 +97,16 @@ const state = {
 
     // VK Mini Apps / VK Pay
     app_payload: true,
-    vkpay_transaction: true
+    vkpay_transaction: true,
+
+    // VK Донат
+    donut_subscription_create: true,
+    donut_subscription_prolonged: true,
+    donut_subscription_expired: true,
+    donut_subscription_cancelled: true,
+    donut_subscription_price_changed: true,
+    donut_money_withdraw: true,
+    donut_money_withdraw_error: true
   }
 };
 

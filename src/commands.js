@@ -23,7 +23,23 @@ function reply(msg, text, opts = {}) {
   return sendTelegramMessageWithRetry(msg.chat.id, text, finalOpts);
 }
 
+// В группах Telegram-клиент подставляет команду из меню "/" вместе с именем бота: "/help@ArgusBot".
+// Регулярки вида /^\/help$/ такое не ловили — команды из меню в супергруппе молча игнорировались.
+// Теперь суффикс @имя допускается, а команды, адресованные ДРУГОМУ боту, игнорируются (раньше
+// обработчик неизвестных команд отвечал «Команда не найдена» на /start@ДругойБот).
+let botUsername = null;
+function addressedToOtherBot(msg) {
+  const m = /^\/\w+@(\w+)/.exec(msg.text || '');
+  return !!(m && botUsername && m[1].toLowerCase() !== botUsername.toLowerCase());
+}
+
 function registerCommands(bot) {
+  bot.getMe().then(me => { botUsername = me.username; }).catch(e => console.warn('[commands] getMe не удался:', e.message));
+  const on = (re, handler) => bot.onText(re, (msg, m) => {
+    if (addressedToOtherBot(msg)) return;
+    return handler(msg, m);
+  });
+
   // Регистрация меню команд Telegram (автокомплит по "/") — список дублирует /help.
   // Fire-and-forget: не должно блокировать остальную регистрацию обработчиков.
   bot.setMyCommands([
@@ -45,7 +61,7 @@ function registerCommands(bot) {
     { command: 'raw_event', description: 'Сырой JSON последнего VK-события (админ)' }
   ]).catch(e => console.error('Не удалось зарегистрировать команды бота:', e.message));
 
-  bot.onText(/^\/help$/, async (msg) => {
+  on(/^\/(?:help|start)(?:@\w+)?$/, async (msg) => {
     const text = [
       '👋 Доступные команды:',
       '/status — статус',
@@ -68,15 +84,15 @@ function registerCommands(bot) {
     await reply(msg, text);
   });
 
-  bot.onText(/^\/status$/, msg =>
+  on(/^\/status(?:@\w+)?$/, msg =>
     reply(msg, '✅ Бот активен.')
   );
 
-  bot.onText(/^\/my_chat_id$/, msg =>
+  on(/^\/my_chat_id(?:@\w+)?$/, msg =>
     reply(msg, `ID: <code>${msg.chat.id}</code>`, { parse_mode: 'HTML' })
   );
 
-  bot.onText(/^\/whoami$/, msg => {
+  on(/^\/whoami(?:@\w+)?$/, msg => {
     const u = msg.from || {};
     const lines = [
       `Ты: <b>${escapeHtml([u.first_name, u.last_name].filter(Boolean).join(' ') || '—')}</b>`,
@@ -87,7 +103,7 @@ function registerCommands(bot) {
     reply(msg, lines.join('\n'), { parse_mode: 'HTML' });
   });
 
-  bot.onText(/^\/ping$/, async (msg) => {
+  on(/^\/ping(?:@\w+)?$/, async (msg) => {
     const t0 = Date.now();
     const sendOpts = {};
     if (msg.message_thread_id != null) sendOpts.message_thread_id = msg.message_thread_id;
@@ -96,7 +112,7 @@ function registerCommands(bot) {
     await bot.editMessageText(`🏓 pong (${dt}ms)`, { chat_id: m.chat.id, message_id: m.message_id });
   });
 
-  bot.onText(/^\/version$/, msg => {
+  on(/^\/version(?:@\w+)?$/, msg => {
     const started = global.__BOT_STARTED_AT || new Date();
     const uptimeSec = Math.floor((Date.now() - started.getTime()) / 1000);
     const lines = [
@@ -108,7 +124,7 @@ function registerCommands(bot) {
   });
 
   // ==== Админ-команды ====
-  bot.onText(/^\/test_notification$/, msg => {
+  on(/^\/test_notification(?:@\w+)?$/, msg => {
     if (!isAdmin(msg.from?.id)) return;
     const targetChat = DEBUG_CHAT_ID || msg.chat.id;
     // Тема из msg подходит только если реально шлём в ТОТ ЖЕ чат, откуда пришла команда —
@@ -120,7 +136,7 @@ function registerCommands(bot) {
     }
   });
 
-  bot.onText(/^\/list_events$/, msg => {
+  on(/^\/list_events(?:@\w+)?$/, msg => {
     if (!isAdmin(msg.from?.id)) return;
     const lines = ['✨ Статус событий:'];
     Object.keys(state.eventToggleState).sort().forEach(t => {
@@ -129,7 +145,7 @@ function registerCommands(bot) {
     reply(msg, lines.join('\n'));
   });
 
-  bot.onText(/^\/toggle_event\s+(\S+)$/, (msg, m) => {
+  on(/^\/toggle_event(?:@\w+)?\s+(\S+)$/, (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     const key = m[1];
     const newValue = toggleEvent(key);
@@ -140,13 +156,13 @@ function registerCommands(bot) {
     reply(msg, `${key}: ${newValue ? '✅ включено' : '❌ отключено'}`);
   });
 
-  bot.onText(/^\/set_main_chat\s+(-?\d+)$/, (msg, m) => {
+  on(/^\/set_main_chat(?:@\w+)?\s+(-?\d+)$/, (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     setMainChat(m[1]);
     reply(msg, `Основной чат: <code>${state.CURRENT_MAIN_CHAT_ID}</code>`, { parse_mode: 'HTML' });
   });
 
-  bot.onText(/^\/send_main\s+([\s\S]+)$/, (msg, m) => {
+  on(/^\/send_main(?:@\w+)?\s+([\s\S]+)$/, (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     const text = m[1].trim();
     if (!text) return;
@@ -157,7 +173,7 @@ function registerCommands(bot) {
   });
 
   // ==== Темы (forum topics) супергруппы ====
-  bot.onText(/^\/topic_id$/, msg => {
+  on(/^\/topic_id(?:@\w+)?$/, msg => {
     const threadId = msg.message_thread_id;
     const text = threadId
       ? `ID темы (thread): <code>${threadId}</code>`
@@ -165,7 +181,7 @@ function registerCommands(bot) {
     reply(msg, text, { parse_mode: 'HTML' });
   });
 
-  bot.onText(/^\/topics$/, msg => {
+  on(/^\/topics(?:@\w+)?$/, msg => {
     if (!isAdmin(msg.from?.id)) return;
     const lines = ['🧵 Темы по ролям уведомлений:'];
     TOPIC_ROLES.forEach(role => {
@@ -175,7 +191,7 @@ function registerCommands(bot) {
     reply(msg, lines.join('\n'), { parse_mode: 'HTML' });
   });
 
-  bot.onText(/^\/set_topic\s+(\S+)\s+(here|off|-?\d+)$/, (msg, m) => {
+  on(/^\/set_topic(?:@\w+)?\s+(\S+)\s+(here|off|-?\d+)$/, (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     const [, role, rawValue] = m;
 
@@ -215,7 +231,7 @@ function registerCommands(bot) {
   });
 
   // ==== Статистика ====
-  bot.onText(/^\/stats$/, async (msg) => {
+  on(/^\/stats(?:@\w+)?$/, async (msg) => {
     if (!isAdmin(msg.from?.id)) return;
     try {
       // Таймаут — как у /health (server.js) — иначе недоступный Firestore вешает команду без
@@ -233,7 +249,7 @@ function registerCommands(bot) {
   });
 
   // ==== Диагностика: сырой payload последнего события из bot_logs (Firestore) ====
-  bot.onText(/^\/raw_event(?:\s+(\S+))?$/, async (msg, m) => {
+  on(/^\/raw_event(?:@\w+)?(?:\s+(\S+))?$/, async (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     const wantedType = m[1];
     try {
@@ -265,8 +281,8 @@ function registerCommands(bot) {
 
   // неизвестные команды
   bot.on('message', async (msg) => {
-    if (!msg.text) return;
-    if (/^\//.test(msg.text) && !/^\/(help|status|my_chat_id|whoami|ping|version|test_notification|list_events|toggle_event|set_main_chat|send_main|topic_id|topics|set_topic|stats|raw_event)\b/.test(msg.text)) {
+    if (!msg.text || addressedToOtherBot(msg)) return;
+    if (/^\//.test(msg.text) && !/^\/(help|start|status|my_chat_id|whoami|ping|version|test_notification|list_events|toggle_event|set_main_chat|send_main|topic_id|topics|set_topic|stats|raw_event)\b/.test(msg.text)) {
       await reply(msg, 'Команда не найдена. Напиши /help');
     }
   });
