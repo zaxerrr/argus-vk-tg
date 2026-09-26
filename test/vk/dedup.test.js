@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildKey, shouldProcessEvent, rememberEvent } = require('../../src/vk/dedup');
+const { buildKey, shouldProcessEvent, rememberEvent, isMirroredLike } = require('../../src/vk/dedup');
 
 test('same input yields same key', () => {
   const ctx = {
@@ -165,4 +165,57 @@ test('message_reaction_event by different reactors on the same message yield dif
   };
 
   assert.notEqual(buildKey(reactionByUser1), buildKey(reactionByUser2));
+});
+
+test('parallel duplicate deliveries: only the first passes (race regression)', async () => {
+  const ctx = {
+    type: 'like_add',
+    group_id: 198160981,
+    object: { liker_id: 23943160, object_type: 'post', object_id: 1521, object_owner_id: -198160981 }
+  };
+  // Firestore отвечает медленно — обе доставки успевают дойти до await до первой записи.
+  const slowDb = {
+    collection: () => ({
+      doc: () => ({
+        get: () => new Promise(r => setTimeout(() => r({ exists: false }), 20)),
+        set: async () => {}
+      })
+    })
+  };
+  const results = await Promise.all([shouldProcessEvent(ctx, slowDb), shouldProcessEvent(ctx, slowDb)]);
+  assert.deepEqual(results.sort(), [false, true]);
+});
+
+test('like on clip and on post with the same numeric id yield different keys', () => {
+  const base = { type: 'like_add', group_id: 1, object: { liker_id: 5, object_id: 77, object_owner_id: -1 } };
+  const clip = { ...base, object: { ...base.object, object_type: 'clip' } };
+  const post = { ...base, object: { ...base.object, object_type: 'post' } };
+  assert.notEqual(buildKey(clip), buildKey(post));
+});
+
+test('isMirroredLike: clip like + its post like from the same liker → second is a mirror', () => {
+  const clip = { type: 'like_add', group_id: 9, object: { liker_id: 57709262, object_type: 'clip', object_id: 456239288, object_owner_id: -9 } };
+  const post = { type: 'like_add', group_id: 9, object: { liker_id: 57709262, object_type: 'post', object_id: 1521, object_owner_id: -9 } };
+  assert.equal(isMirroredLike(clip), false);
+  assert.equal(isMirroredLike(post), true);
+});
+
+test('isMirroredLike: order post → clip works too; like_remove is paired separately', () => {
+  const post = { type: 'like_add', group_id: 10, object: { liker_id: 1, object_type: 'post', object_id: 1521, object_owner_id: -10 } };
+  const clip = { type: 'like_add', group_id: 10, object: { liker_id: 1, object_type: 'clip', object_id: 456, object_owner_id: -10 } };
+  const unClip = { type: 'like_remove', group_id: 10, object: { liker_id: 1, object_type: 'clip', object_id: 456, object_owner_id: -10 } };
+  assert.equal(isMirroredLike(post), false);
+  assert.equal(isMirroredLike(unClip), false);
+  assert.equal(isMirroredLike(clip), true);
+});
+
+test('isMirroredLike: two different posts, or different likers, are not mirrors', () => {
+  const p1 = { type: 'like_add', group_id: 11, object: { liker_id: 1, object_type: 'post', object_id: 1, object_owner_id: -11 } };
+  const p2 = { type: 'like_add', group_id: 11, object: { liker_id: 1, object_type: 'post', object_id: 2, object_owner_id: -11 } };
+  const clipOther = { type: 'like_add', group_id: 11, object: { liker_id: 2, object_type: 'clip', object_id: 3, object_owner_id: -11 } };
+  const photo = { type: 'like_add', group_id: 11, object: { liker_id: 1, object_type: 'photo', object_id: 4, object_owner_id: -11 } };
+  assert.equal(isMirroredLike(p1), false);
+  assert.equal(isMirroredLike(p2), false);
+  assert.equal(isMirroredLike(clipOther), false);
+  assert.equal(isMirroredLike(photo), false);
 });

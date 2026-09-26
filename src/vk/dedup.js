@@ -25,6 +25,8 @@ function buildKey({ type, object, group_id }) {
 
   const payload = {
     type,
+    // object_type — чтобы лайк клипа и лайк поста с совпавшим числовым ID не схлопнулись.
+    objectType: object?.object_type || null,
     objectId,
     actorId,
     groupId: group_id || 'nogrp',
@@ -44,9 +46,15 @@ function buildKey({ type, object, group_id }) {
 // ничего не знает — и оно обрабатывается повторно, задваивая уведомления. Firestore переживает
 // рестарт и закрывает это окно; in-memory кэш остаётся первым, самым дешёвым и быстрым уровнем
 // проверки (без похода в сеть) для дублей внутри одного и того же процесса.
+//
+// Проверка и «захват» ключа в памяти — синхронно, ДО первого await. VK шлёт повторные доставки
+// параллельно, с интервалом в миллисекунды: если бы ключ помечался только после похода в Firestore
+// (как было — в rememberEvent), обе доставки успевали бы пройти cache.has() и обе ушли бы в
+// Telegram (дубли «к посту (Всего: 92)» ×2 от 26.09.2026).
 async function shouldProcessEvent(ctx, db) {
   const key = buildKey(ctx);
   if (cache.has(key)) return false;
+  cache.set(key, true);
   if (!db) return true; // без Firestore-клиента (напр. в тестах) — только in-memory уровень
 
   try {
@@ -70,4 +78,28 @@ function rememberEvent(ctx, db) {
     .catch(e => console.warn('[dedup] Не удалось сохранить ключ в Firestore:', e.message));
 }
 
-module.exports = { buildKey, shouldProcessEvent, rememberEvent };
+// Лайк клипа, опубликованного в посте, VK присылает ДВАЖДЫ: like_add на clip и like_add на пост,
+// в котором этот клип лежит (лайки у них общие — счётчик поста растёт от каждого лайка клипа).
+// ID поста в событии клипа нет, поэтому пару узнаём по «тот же тип события + тот же лайкер +
+// тот же владелец, один объект clip, другой post, в пределах MIRROR_WINDOW_SEC» и пропускаем
+// второе. Два поста подряд (или два клипа) так не схлопываются — только пара клип↔пост.
+const MIRROR_WINDOW_SEC = 10;
+const MIRROR_TYPES = new Set(['clip', 'post']);
+const mirrorCache = new NodeCache({ stdTTL: MIRROR_WINDOW_SEC, checkperiod: 5 });
+
+function isMirroredLike({ type, object, group_id }) {
+  if (type !== 'like_add' && type !== 'like_remove') return false;
+  const objType = object?.object_type;
+  if (!MIRROR_TYPES.has(objType) || !object?.liker_id) return false;
+
+  const key = [type, group_id || 'nogrp', object.liker_id, object.object_owner_id || object.owner_id || ''].join(':');
+  const seenType = mirrorCache.get(key);
+  if (seenType && seenType !== objType) {
+    mirrorCache.del(key);
+    return true;
+  }
+  mirrorCache.set(key, objType);
+  return false;
+}
+
+module.exports = { buildKey, shouldProcessEvent, rememberEvent, isMirroredLike };

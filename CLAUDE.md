@@ -81,6 +81,10 @@ an explicit parameter (not a top-level `require('../lib/db')`) specifically so `
 keeps zero side-effecting imports and stays testable in isolation (see Testing conventions below);
 omitting `db` (as the unit tests do) falls back to in-memory-only behavior. A failed/unreachable
 Firestore check fails open (treats the event as new) rather than blocking real events.
+`shouldProcessEvent` claims the in-memory key synchronously *before* its first `await` — VK sends
+duplicate deliveries in parallel, and claiming only after the Firestore round-trip let both through.
+After dedup, `isMirroredLike()` drops the second half of VK's clip↔post like pair (a like on a clip
+embedded in a post arrives as two `like_add`s, clip and post, from the same liker within seconds).
 `eventToggleState`, `CURRENT_MAIN_CHAT_ID`, and `topics`, however, are persisted to the Firestore
 document `bot_state/main` via
 `src/lib/stateStore.js`: loaded once on boot (`loadPersistedState()`, awaited before `app.listen`)
@@ -288,7 +292,11 @@ payload в Telegram), входящие сообщения Telegram — `logIncom
 (а не через `require('../lib/db')` на верхнем уровне модуля) специально для того, чтобы
 `src/vk/dedup.js` оставался без побочных эффектов при импорте и тестировался изолированно (см.
 «Соглашения по тестированию» ниже); без `db` (как в юнит-тестах) работает только in-memory уровень.
-Недоступность/ошибка Firestore не блокирует обработку реальных событий (fail-open). А вот `eventToggleState`,
+Недоступность/ошибка Firestore не блокирует обработку реальных событий (fail-open).
+`shouldProcessEvent` захватывает ключ в памяти синхронно, *до* первого `await` — VK шлёт повторные
+доставки параллельно, и захват после похода в Firestore пропускал обе. После дедупа
+`isMirroredLike()` отбрасывает вторую половину пары лайков клип↔пост (лайк клипа, вложенного в
+пост, VK присылает двумя `like_add` — на clip и на post — от одного лайкера за секунды). А вот `eventToggleState`,
 `CURRENT_MAIN_CHAT_ID` и `topics` теперь персистентны — хранятся в документе Firestore
 `bot_state/main` через `src/lib/stateStore.js`: загружаются один раз при старте
 (`loadPersistedState()`, ожидается перед `app.listen`) и сохраняются при каждом вызове

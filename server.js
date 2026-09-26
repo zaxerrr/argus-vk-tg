@@ -15,7 +15,7 @@ const {
 
 const { bot, sendToRole } = require('./src/telegram');
 const { registerCommands } = require('./src/commands');
-const { shouldProcessEvent, rememberEvent } = require('./src/vk/dedup');
+const { shouldProcessEvent, rememberEvent, isMirroredLike } = require('./src/vk/dedup');
 const { handleVkEvent } = require('./src/vk/events');
 const { loadPersistedState } = require('./src/state');
 const { createRateLimiter } = require('./src/security/rateLimit');
@@ -112,6 +112,10 @@ app.post('/webhook', webhookRateLimit, logMiddlewareVK(), async (req, res) => {
       return;
     }
     rememberEvent({ type, object, group_id }, db);
+    if (isMirroredLike({ type, object, group_id })) {
+      console.log('Зеркальный лайк клип↔пост — пропуск.');
+      return;
+    }
     logger.info({ source: 'vk', event: 'processed_event', request_id: req.requestId, summary: type, payload: { type } });
 
     // Обработка события
