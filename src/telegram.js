@@ -54,34 +54,67 @@ function resolveRoleTarget(role) {
   return { chatId: null, threadId: undefined };
 }
 
+// Ошибка Telegram Bot API → { code, retryAfter }. node-telegram-bot-api кладёт ответ API в
+// err.response.body ({ ok:false, error_code, description, parameters: { retry_after } }).
+function telegramErrorInfo(err) {
+  const body = err && err.response && err.response.body;
+  return {
+    code: body && body.error_code,
+    retryAfter: body && body.parameters && body.parameters.retry_after
+  };
+}
+
+// Сообщить о сбое отправки в роль debug. Раньше сравнивался только chat_id: в схеме «всё в одной
+// супергруппе» debug — тема ТОГО ЖЕ чата, что и main, поэтому сбои отправки в main (например,
+// "message thread not found") в debug не попадали вообще. Теперь молчим, только если сбой — в
+// саму тему debug (иначе рекурсия).
+async function reportSendFailure(chatId, threadId, text) {
+  const debugTarget = resolveRoleTarget('debug');
+  if (!debugTarget.chatId) return;
+  const sameChat = String(chatId) === String(debugTarget.chatId);
+  const sameThread = (threadId ?? null) === (debugTarget.threadId ?? null);
+  if (sameChat && sameThread) return;
+  const debugOpts = { disable_web_page_preview: true };
+  if (debugTarget.threadId != null) debugOpts.message_thread_id = debugTarget.threadId;
+  try { await bot.sendMessage(debugTarget.chatId, `⚠️ ${text}`, debugOpts); } catch {}
+}
+
+// Не бросает исключений: возвращает true/false. 400 (неверный HTML, нет темы, слишком длинное
+// сообщение) и 403 (бота удалили из чата) не лечатся повтором — раньше такое сообщение
+// отправлялось ещё дважды, а в debug уходили три одинаковых предупреждения. На 429 ждём столько,
+// сколько просит Telegram (retry_after), но не дольше 30 с.
 async function sendTelegramMessageWithRetry(chatId, text, options = {}) {
-  for (let i = 0; i < 3; i++) {
+  const MAX_ATTEMPTS = 3;
+  let lastError = null;
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
     try {
       await bot.sendMessage(chatId, text, { ...options, disable_web_page_preview: true });
       logOutgoing(chatId, text);
-      return;
+      return true;
     } catch (err) {
-      const msg = `Ошибка sendMessage (${i + 1}/3) в чат ${chatId}: ${err.message}`;
-      console.error(msg);
-      const debugTarget = resolveRoleTarget('debug');
-      if (debugTarget.chatId && String(chatId) !== String(debugTarget.chatId)) {
-        const debugOpts = { disable_web_page_preview: true };
-        if (debugTarget.threadId != null) debugOpts.message_thread_id = debugTarget.threadId;
-        try { await bot.sendMessage(debugTarget.chatId, `⚠️ ${msg}`, debugOpts); } catch {}
+      lastError = err;
+      const { code, retryAfter } = telegramErrorInfo(err);
+      console.error(`Ошибка sendMessage (${i + 1}/${MAX_ATTEMPTS}) в чат ${chatId}: ${err.message}`);
+      if (code === 400 || code === 403) break;
+      if (i < MAX_ATTEMPTS - 1) {
+        const waitMs = code === 429 && retryAfter ? Math.min(retryAfter, 30) * 1000 : 1000 * (i + 1);
+        await new Promise(r => setTimeout(r, waitMs));
       }
-      if (i < 2) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
+  await reportSendFailure(chatId, options.message_thread_id,
+    `Не удалось отправить сообщение в чат ${chatId}${options.message_thread_id != null ? ` (тема ${options.message_thread_id})` : ''}: ${lastError && lastError.message}`);
+  return false;
 }
 
 // Отправка по роли уведомлений — не нужно знать конкретный chat/thread, resolveRoleTarget()
 // решает это сам (см. выше). Тихо ничего не делает, если роль не сконфигурирована.
 async function sendToRole(role, text, options = {}) {
   const { chatId, threadId } = resolveRoleTarget(role);
-  if (!chatId || !text) return;
+  if (!chatId || !text) return false;
   const opts = { ...options };
   if (threadId != null) opts.message_thread_id = threadId;
-  await sendTelegramMessageWithRetry(String(chatId), text, opts);
+  return sendTelegramMessageWithRetry(String(chatId), text, opts);
 }
 
 module.exports = { bot, sendTelegramMessageWithRetry, sendToRole, resolveRoleTarget };

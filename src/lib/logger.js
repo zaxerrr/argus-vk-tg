@@ -4,6 +4,7 @@
 // (дружелюбно к бесплатным квотам Firestore — меньше сетевых round-trip'ов на запись).
 const { db } = require('./db');
 const { randomUUID } = require('crypto');
+const { toFirestoreSafe } = require('./firestoreSafe');
 
 const LOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 суток — см. expireAt ниже
 
@@ -73,7 +74,8 @@ class FirestoreLogger {
           user_id: r.user_id || null,
           direction: r.direction || 'none',
           summary: r.summary || null,
-          payload: r.payload ?? null,
+          // См. src/lib/firestoreSafe.js: вложенные массивы/undefined в payload роняли весь пакет.
+          payload: toFirestoreSafe(r.payload ?? null),
           error: r.error || null,
           // Timestamp для TTL-политики Firestore (ts — строка, TTL её не понимает). Без политики
           // поле ни на что не влияет; с ней bot_logs перестаёт расти бесконечно (там тексты

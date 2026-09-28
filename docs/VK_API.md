@@ -186,7 +186,7 @@ more — you should ignore it». Повторная доставка прихо�
 | `wall_schedule_post_new` / `_delete` | ✅ | ✅ | добавлено 2026-09-26; поля `id`, `schedule_time` |
 | `wall_reply_new` / `_edit` / `_restore` | ✅ | ✅ | доп. поля `post_id`, `post_owner_id` |
 | `wall_reply_delete` | ✅ | ✅ | поля `owner_id`, `id`, `deleter_id`, `post_id` |
-| `photo_new` | ✅ | ✅ | |
+| `photo_new` | ✅ | ✅ | `user_id = 100` — фото загружено от имени сообщества (не пользователь), показывается сообщество |
 | `photo_comment_new` / `_edit` / `_restore` / `_delete` | ✅ | ✅ | доп. поля `photo_id`, `photo_owner_id` |
 | `video_new` | ✅ | ✅ | |
 | `video_comment_new` / `_edit` / `_restore` / `_delete` | ✅ | ✅ | доп. поля `video_id`, `video_owner_id` |
@@ -229,6 +229,9 @@ more — you should ignore it». Повторная доставка прихо�
   `like_add` на пост с этим клипом (лайки у них общие, счётчик поста растёт от каждого лайка
   клипа). `isMirroredLike()` в `src/vk/dedup.js` пропускает второе событие пары «тот же лайкер +
   clip↔post в пределах 10 с». В чат уходит одно уведомление — то, что пришло первым.
+- Ссылка на объект лайка: для комментария под записью есть `post_id`; для комментариев к
+  фото/видео/обсуждениям/товарам VK родителя не присылает — уведомление без ссылки (раньше
+  подставлялся ID комментария, и ссылка вела на несуществующее фото).
 - Дедуп (`src/vk/dedup.js`):
   1. Основной ключ — `event_id` (память 10 мин + Firestore `dedup_seen` сутки): отсекает повторы
      VK, включая пришедшие после рестарта процесса.

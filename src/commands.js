@@ -35,9 +35,14 @@ function addressedToOtherBot(msg) {
 
 function registerCommands(bot) {
   bot.getMe().then(me => { botUsername = me.username; }).catch(e => console.warn('[commands] getMe не удался:', e.message));
+  // node-telegram-bot-api не ловит ошибки обработчиков onText: отклонённый промис становится
+  // unhandledRejection, а Node (с v15) на нём завершает процесс. Поэтому любой сбой обработчика
+  // (например, /ping, где sendMessage вызывается напрямую) ловим и логируем здесь.
   const on = (re, handler) => bot.onText(re, (msg, m) => {
     if (addressedToOtherBot(msg)) return;
-    return handler(msg, m);
+    Promise.resolve()
+      .then(() => handler(msg, m))
+      .catch(e => console.error(`[commands] Ошибка обработчика ${re}:`, e && e.message));
   });
 
   // Регистрация меню команд Telegram (автокомплит по "/") — список дублирует /help.
@@ -115,11 +120,12 @@ function registerCommands(bot) {
   on(/^\/version(?:@\w+)?$/, msg => {
     const started = global.__BOT_STARTED_AT || new Date();
     const uptimeSec = Math.floor((Date.now() - started.getTime()) / 1000);
+    // ID основного чата — только админам: /version доступна любому, кто напишет боту.
     const lines = [
       `🟢 Версия: <b>${BOT_VERSION}</b>`,
-      `Основной чат: <code>${state.CURRENT_MAIN_CHAT_ID}</code>`,
+      isAdmin(msg.from?.id) && `Основной чат: <code>${state.CURRENT_MAIN_CHAT_ID}</code>`,
       `Uptime: ${uptimeSec}s`
-    ];
+    ].filter(Boolean);
     reply(msg, lines.join('\n'), { parse_mode: 'HTML' });
   });
 
@@ -162,14 +168,14 @@ function registerCommands(bot) {
     reply(msg, `Основной чат: <code>${state.CURRENT_MAIN_CHAT_ID}</code>`, { parse_mode: 'HTML' });
   });
 
-  on(/^\/send_main(?:@\w+)?\s+([\s\S]+)$/, (msg, m) => {
+  on(/^\/send_main(?:@\w+)?\s+([\s\S]+)$/, async (msg, m) => {
     if (!isAdmin(msg.from?.id)) return;
     const text = m[1].trim();
     if (!text) return;
     // Целевой чат тут ДРУГОЙ (state.CURRENT_MAIN_CHAT_ID) — thread ID из msg относится к чату,
     // откуда вызвана команда, и не подходит для него, поэтому обычный sendTelegramMessageWithRetry.
-    sendTelegramMessageWithRetry(state.CURRENT_MAIN_CHAT_ID, text);
-    reply(msg, '✅ Отправлено.');
+    const ok = await sendTelegramMessageWithRetry(state.CURRENT_MAIN_CHAT_ID, text);
+    await reply(msg, ok ? '✅ Отправлено.' : '❌ Не удалось отправить — подробности в debug и логах Render.');
   });
 
   // ==== Темы (forum topics) супергруппы ====

@@ -14,11 +14,17 @@ async function loadState(state) {
     const data = snap.data();
 
     if (data.main_chat_id) state.CURRENT_MAIN_CHAT_ID = String(data.main_chat_id);
+    // Только известные коду ключи: иначе в /list_events навсегда оставались бы типы, давно
+    // удалённые из src/state.js (например, старый несуществующий "typing_status").
     if (data.event_toggle_state && typeof data.event_toggle_state === 'object') {
-      Object.assign(state.eventToggleState, data.event_toggle_state);
+      for (const [key, value] of Object.entries(data.event_toggle_state)) {
+        if (key in state.eventToggleState && typeof value === 'boolean') state.eventToggleState[key] = value;
+      }
     }
     if (data.topics && typeof data.topics === 'object') {
-      Object.assign(state.topics, data.topics);
+      for (const [role, value] of Object.entries(data.topics)) {
+        if (role in state.topics && (value === null || Number.isFinite(value))) state.topics[role] = value;
+      }
     }
   } catch (e) {
     logError('state', 'load_exception', e);

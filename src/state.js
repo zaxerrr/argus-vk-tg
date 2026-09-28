@@ -141,8 +141,23 @@ function toggleEvent(type) {
   return state.eventToggleState[type];
 }
 
-async function loadPersistedState() {
-  await require('./lib/stateStore').loadState(state);
+// Ждём не дольше 5 с: server.js вызывает это ДО app.listen, и зависший Firestore (сеть, неверный
+// ID базы) иначе держал бы порт закрытым — на Render это провал деплоя по таймауту старта, а при
+// пробуждении free-инстанса ещё и лишние секунды без ответа VK. Не дождались — работаем на
+// дефолтах, как при любой ошибке загрузки.
+async function loadPersistedState(timeoutMs = 5000) {
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => {
+      console.warn(`[state] Firestore не ответил за ${timeoutMs} мс — стартуем с настройками по умолчанию`);
+      resolve();
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([require('./lib/stateStore').loadState(state), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Возвращает true для всех событий, КРОМЕ явно отключённых (=== false)

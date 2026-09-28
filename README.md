@@ -125,6 +125,15 @@ repeated deliveries aren't double-counted. Set `STATS_DIGEST_HOURS` to post it a
   one is sent. Clip counters are requested as `video` (clips are videos in VK) — not yet verified
   against a real key.
 - While the Render free instance sleeps, commands aren't processed (see `docs/RENDER.md`).
+- `npm audit` still reports advisories that come only through `node-telegram-bot-api@0.66`
+  (`request`, `form-data`) and through `firebase-admin`'s unused Storage client (`gaxios`/`uuid`).
+  The first needs a major, API-breaking upgrade tested against a real bot (see `CLAUDE.md`).
+- Likes on photo/video/discussion/market comments get no link: VK doesn't send the parent object's ID.
+
+### Tests
+
+`npm test` — unit tests, offline. `npm run test:integration` — the same code against the Firestore
+emulator (needs Java 21); CI runs both.
 
 ---
 
@@ -248,3 +257,12 @@ repeated deliveries aren't double-counted. Set `STATS_DIGEST_HOURS` to post it a
   первое. Счётчик для клипа запрашивается как для `video` (клип в VK — видеозапись); на реальном
   ключе ещё не проверено.
 - Пока инстанс Render free спит, команды не обрабатываются (см. `docs/RENDER.md`).
+- `npm audit` всё ещё показывает уязвимости, пришедшие только через `node-telegram-bot-api@0.66`
+  (`request`, `form-data`) и через неиспользуемый клиент Storage в `firebase-admin` (`gaxios`/`uuid`).
+  Для первых нужен мажорный апгрейд с другим API и проверкой на реальном боте (см. `CLAUDE.md`).
+- У лайков комментариев к фото/видео/обсуждениям/товарам нет ссылки: VK не присылает ID родителя.
+
+### Тесты
+
+`npm test` — юнит-тесты, без сети. `npm run test:integration` — тот же код против эмулятора
+Firestore (нужна Java 21); в CI гоняются оба.

@@ -22,6 +22,9 @@ formatted notifications to Telegram via long-polling (`node-telegram-bot-api`). 
 - `npm test` — run the test suite (`node --test`, Node's built-in test runner; `test/setupEnv.js`
   is preloaded via `--require` to stub the required env vars, so tests don't need a real `.env`)
 - `node --test test/vk/dedup.test.js` — run a single test file
+- `npm run test:integration` — `test/integration/` against the Firestore emulator (needs Java 21;
+  `firebase.json` in the repo root is only the emulator config). Also runs in CI as a separate job.
+  Without `FIRESTORE_EMULATOR_HOST` the integration test is skipped, so plain `npm test` stays offline.
 - No lint/build step is configured.
 
 #### Required environment variables
@@ -42,6 +45,9 @@ project's database is *not* named — see the warning in `docs/FIREBASE_SETUP.md
 [Forum topics](#forum-topics-single-supergroup) below), `STATS_DIGEST_HOURS`, `ADMIN_USER_IDS`
 (comma-separated Telegram user IDs), `BOT_VERSION` (falls back to `package.json` version), `PORT`
 (default 3000, but hosting providers that inject their own `PORT` — e.g. Render — take priority).
+Optional numeric vars (`STATS_DIGEST_HOURS`, `TELEGRAM_TOPIC_*_ID`) are validated in `src/config.js`:
+a non-positive/non-numeric value is ignored with a warning (`STATS_DIGEST_HOURS=abc` used to become
+`setInterval(NaN)`, i.e. a digest every millisecond); `VK_GROUP_ID` with a leading minus is normalized.
 See `.env.example` for a filled-in template. No migrations to run: Firestore collections/documents
 are created on first write (`docs/FIREBASE_SETUP.md` lists what gets created and by which module).
 
@@ -67,7 +73,18 @@ VK API calls all go through `vkApi()` in `src/vk/api.js` (domain `api.vk.ru`, ke
 `Authorization: Bearer` header, `v=5.199`, errors returned as `{ error }` — VK reports errors in an
 HTTP 200 body). Don't call `axios` against VK directly.
 
-Logging: `src/lib/logger.js` batches records into the Firestore `bot_logs` collection. Incoming VK
+Telegram sending (`src/telegram.js`): `sendTelegramMessageWithRetry()` never throws and returns
+`true`/`false`; it doesn't retry 400/403 (permanent: bad HTML, missing topic, bot removed), waits
+`retry_after` on 429, and reports a final failure once to the `debug` role — including when
+`debug` is a topic of the same chat (compare chat **and** thread, not just chat). Command handlers
+registered via `on()` in `src/commands.js` have their rejections caught, and `server.js` installs
+a `process.on('unhandledRejection')` logger: Node ≥15 exits on an unhandled rejection, and
+`node-telegram-bot-api` doesn't catch errors thrown by `onText` handlers.
+
+Logging: `src/lib/logger.js` batches records into the Firestore `bot_logs` collection. Every
+`payload` goes through `toFirestoreSafe()` (`src/lib/firestoreSafe.js`): Firestore rejects nested
+arrays (VK `keyboard.buttons`), `undefined` and `__reserved__` keys, and one bad record used to fail
+the whole batch commit (up to 50 records lost). Incoming VK
 webhooks are logged by `logIncomingVK(req)`, called **after** the secret check so unauthenticated
 floods cost no Firestore writes (the `secret` field is stripped — `/raw_event` echoes logged
 payloads into Telegram); every record carries an `expireAt` Timestamp (30 days) for a TTL policy, incoming Telegram messages by `logIncomingTelegram()` from
@@ -217,7 +234,9 @@ cheap and always 200), env var changes need a deploy, Node pinned via `engines`.
 ### Testing conventions
 
 Tests use Node's built-in `node:test` + `node:assert/strict` (see `test/vk/dedup.test.js`), not
-Jest/Mocha. Place new tests under `test/`, mirroring the `src/` path being tested.
+Jest/Mocha. Anything about what Firestore will actually accept (value types, merges, queries)
+belongs in `test/integration/firestore.test.js` — the fake `db` objects in unit tests accept
+anything, which is how the nested-array batch failure went unnoticed. Place new tests under `test/`, mirroring the `src/` path being tested.
 
 `src/vk/events.js` requires `src/telegram.js`, which starts a real long-polling `TelegramBot` as a
 side effect of being `require()`'d. **Never `require('../events')` (or anything that pulls in
@@ -254,6 +273,9 @@ Node.js-бот, который принимает события VK Callback API
 - `npm test` — запуск тестов (`node --test`; заглушки обязательных переменных окружения
   подгружаются через `--require test/setupEnv.js`, поэтому реальный `.env` для тестов не нужен)
 - `node --test test/vk/dedup.test.js` — запуск одного тестового файла
+- `npm run test:integration` — `test/integration/` против эмулятора Firestore (нужна Java 21;
+  `firebase.json` в корне — только конфиг эмулятора). В CI — отдельная задача. Без
+  `FIRESTORE_EMULATOR_HOST` интеграционный тест пропускается, обычный `npm test` работает офлайн.
 - Шаг линтинга/сборки не настроен.
 
 #### Обязательные переменные окружения
@@ -276,7 +298,10 @@ Firestore явно, а не полагается на дефолт `getFirestore
 см. [Темы супергруппы](#темы-forum-topics-единая-супергруппа) ниже), `STATS_DIGEST_HOURS`,
 `ADMIN_USER_IDS` (ID пользователей Telegram через запятую), `BOT_VERSION` (по умолчанию берётся
 версия из `package.json`), `PORT` (по умолчанию 3000, но хостинги со своим `PORT` — например,
-Render — имеют приоритет). См. `.env.example` для готового шаблона. Миграции запускать не нужно:
+Render — имеют приоритет). Необязательные числовые переменные (`STATS_DIGEST_HOURS`,
+`TELEGRAM_TOPIC_*_ID`) проверяются в `src/config.js`: не положительное число игнорируется с
+предупреждением (`STATS_DIGEST_HOURS=abc` раньше давал `setInterval(NaN)` — дайджест каждую
+миллисекунду); минус в `VK_GROUP_ID` убирается. См. `.env.example` для готового шаблона. Миграции запускать не нужно:
 коллекции/документы Firestore создаются при первой записи (что и каким модулем создаётся —
 `docs/FIREBASE_SETUP.md`).
 
@@ -302,7 +327,18 @@ General). Не используйте `reply()`, если отправка ид�
 `Authorization: Bearer`, `v=5.199`, ошибки возвращаются как `{ error }` — VK отдаёт их в теле с
 HTTP 200). Не вызывайте VK через `axios` напрямую.
 
-Логирование: `src/lib/logger.js` пакетно пишет записи в коллекцию Firestore `bot_logs`. Входящие
+Отправка в Telegram (`src/telegram.js`): `sendTelegramMessageWithRetry()` не бросает исключений и
+возвращает `true`/`false`; не повторяет 400/403 (постоянные ошибки: битый HTML, нет темы, бота
+удалили), на 429 ждёт `retry_after` и один раз сообщает об окончательном сбое в роль `debug` — в том
+числе когда `debug` — тема того же чата (сравниваются чат **и** тема, а не только чат). Ошибки
+обработчиков, зарегистрированных через `on()` в `src/commands.js`, перехватываются, а `server.js`
+ставит логирующий `process.on('unhandledRejection')`: Node ≥15 завершает процесс на необработанном
+отклонении, а `node-telegram-bot-api` ошибки обработчиков `onText` не ловит.
+
+Логирование: `src/lib/logger.js` пакетно пишет записи в коллекцию Firestore `bot_logs`. Каждый
+`payload` проходит через `toFirestoreSafe()` (`src/lib/firestoreSafe.js`): Firestore отвергает
+вложенные массивы (VK `keyboard.buttons`), `undefined` и ключи вида `__name__`, и одна такая запись
+роняла commit всего пакета (до 50 записей терялись). Входящие
 вебхуки VK — `logIncomingVK(req)`, вызывается **после** проверки секрета, чтобы флуд без секрета
 не тратил записи Firestore (поле `secret` вырезается: `/raw_event` выводит сохранённые payload в
 Telegram); у каждой записи есть Timestamp `expireAt` (30 суток) для TTL-политики, входящие сообщения Telegram — `logIncomingTelegram()` из `bot.on('message')`
@@ -452,7 +488,9 @@ VK-событий (`src/vk/events.js`, `src/vk/api.js`, `src/state.js`, `src/uti
 ### Соглашения по тестированию
 
 Тесты используют встроенные `node:test` + `node:assert/strict` (см. `test/vk/dedup.test.js`), а не
-Jest/Mocha. Новые тесты размещайте в `test/`, повторяя структуру пути в `src/`, который
+Jest/Mocha. Всё, что касается того, что Firestore реально примет (типы значений, merge, запросы),
+проверяйте в `test/integration/firestore.test.js` — фейковые `db` в юнит-тестах принимают что
+угодно, из-за этого и не был замечен отказ пакета логов на вложенных массивах. Новые тесты размещайте в `test/`, повторяя структуру пути в `src/`, который
 тестируется.
 
 `src/vk/events.js` требует `src/telegram.js`, который при `require()` как побочный эффект

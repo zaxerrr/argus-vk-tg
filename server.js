@@ -26,7 +26,16 @@ const { checkVkServiceKey, escapeHtml } = require('./src/utils');
 const { withRequestId, logIncomingVK, logger, logError } = require('./src/lib/logger');
 const { db } = require('./src/lib/db');
 
+// Страховка: Node с v15 завершает процесс на необработанном отклонении промиса. Бот — один
+// процесс на Render free, и падение из-за единичного сбоя (сеть, Telegram 400 в каком-то
+// обработчике) означало бы тишину до следующего пробуждения. Логируем и живём дальше.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason && reason.stack ? reason.stack : reason);
+  try { logError('process', 'unhandled_rejection', reason); } catch (_) {}
+});
+
 const app = express();
+app.disable('x-powered-by');
 
 app.use(withRequestId());
 app.use(bodyParser.json({ limit: '1mb' }));

@@ -27,6 +27,7 @@ async function notifyLEAD(html) {
 
 // Отрицательный ID — сообщество (ссылка club…, название через groups.getById).
 async function userLink(id) {
+  if (!Number.isFinite(Number(id)) || Number(id) === 0) return 'Неизвестный';
   const name = await getVkUserName(id).catch(() => `id${id}`);
   return `<a href="${vkOwnerUrl(id)}">${escapeHtml(name)}</a>`;
 }
@@ -191,8 +192,10 @@ async function handleVkEvent({ type, object }) {
 
     /* ---------- Медиа ---------- */
     case 'photo_new': {
+      // user_id = 100 VK ставит фото, загруженным от имени сообщества (dev.vk.com, объект Photo) —
+      // это не пользователь (id100 — служебный аккаунт «Администрация ВКонтакте»).
       const ph = object;
-      const u = await userLink(ph.user_id || ph.owner_id);
+      const u = await userLink(ph.user_id && ph.user_id !== 100 ? ph.user_id : ph.owner_id);
       const link = `https://vk.com/photo-${absOwner(ph.owner_id)}_${ph.id}`;
       msg = `🖼️ ${u} к <a href="${link}">фотографии</a>`;
       break;

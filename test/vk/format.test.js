@@ -30,6 +30,12 @@ test('buildObjectLink builds correct VK deep links per object type', () => {
   assert.equal(buildObjectLink(-100, 'unknown_type', 9), null);
 });
 
+test('buildObjectLink gives no link for media/topic comments without a parent id (VK sends none)', () => {
+  assert.equal(buildObjectLink(-100, 'photo_comment', 7), null);
+  assert.equal(buildObjectLink(-100, 'topic_comment', 7), null);
+  assert.equal(buildObjectLink(-100, 'photo_comment', 7, 9), 'https://vk.com/photo-100_9?reply=7');
+});
+
 test('toLikesApiType allow-lists only types supported by likes.getList', () => {
   assert.equal(toLikesApiType('post'), 'post');
   assert.equal(toLikesApiType('PHOTO_COMMENT'), 'photo_comment');

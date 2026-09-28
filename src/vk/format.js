@@ -57,10 +57,13 @@ function buildObjectLink(ownerId, objectType, objectId, postId) {
     case 'clip':            return `https://vk.com/clip-${ownAbs}_${objectId}`; // если не работает — вернётся null
     case 'market':          return `https://vk.com/market-${ownAbs}?w=product-${ownAbs}_${objectId}`;
     case 'topic':           return `https://vk.com/topic-${ownAbs}_${postId || objectId}`;
-    case 'photo_comment':   return `https://vk.com/photo-${ownAbs}_${postId || objectId}?reply=${objectId}`;
-    case 'video_comment':   return `https://vk.com/video-${ownAbs}_${postId || objectId}?reply=${objectId}`;
-    case 'topic_comment':   return `https://vk.com/topic-${ownAbs}_${postId || objectId}?reply=${objectId}`;
-    case 'market_comment':  return `https://vk.com/market-${ownAbs}?w=product-${ownAbs}_${postId || objectId}`;
+    // У лайка комментария к фото/видео/обсуждению/товару VK не присылает ID родительского объекта
+    // (post_id — только для комментария под записью), а подстановка ID самого комментария давала
+    // ссылку на несуществующее фото/видео. Без родителя ссылки нет — только текст.
+    case 'photo_comment':   return postId ? `https://vk.com/photo-${ownAbs}_${postId}?reply=${objectId}` : null;
+    case 'video_comment':   return postId ? `https://vk.com/video-${ownAbs}_${postId}?reply=${objectId}` : null;
+    case 'topic_comment':   return postId ? `https://vk.com/topic-${ownAbs}_${postId}?post=${objectId}` : null;
+    case 'market_comment':  return postId ? `https://vk.com/market-${ownAbs}?w=product-${ownAbs}_${postId}` : null;
     default:                return null;
   }
 }
